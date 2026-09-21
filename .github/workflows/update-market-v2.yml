@@ -15,13 +15,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V3.0.2 full-market analysis
+      - name: Build V3.1 full-market analysis
         run: |
           cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
           from collections import defaultdict
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.0.2'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           S=requests.Session(); S.headers.update(H)
           def num(v):
@@ -211,16 +211,16 @@ jobs:
             if x:
               x=dict(x); x['signal']=max(0,min(100,round(x['strength']*.45+x['entry']*.55)-(0 if x['in_zone'] else 8)-min(15,len(x['risks'])*5)))
               x['signal_label']='偏強' if x['signal']>=75 else ('中性' if x['signal']>=55 else '偏弱'); fixed.append(x)
-          out={'version':'3.0.2','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.0.2 全市場歷史掃描'}
+          out={'version':'3.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.1 全市場歷史掃描'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps({'version':'3.0.2','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
+          print(json.dumps({'version':'3.1','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
           PY
           python /tmp/v3.py
-      - name: Commit V3.0.2 data
+      - name: Commit V3.1 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.0.2 full-market analysis"
+          git commit -m "Update V3.1 full-market analysis"
           git push
