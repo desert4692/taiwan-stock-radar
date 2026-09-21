@@ -3,8 +3,9 @@ name: Update Taiwan Market Data
 on:
   workflow_dispatch:
   schedule:
-    # UTC 01:10-05:40 = Taiwan 09:10-13:40, weekdays, every 10 min
+    # Taiwan 09:00-14:00, weekdays, every 10 min
     - cron: '0,10,20,30,40,50 1-5 * * 1-5'
+    - cron: '0 6 * * 1-5'
 
 permissions:
   contents: write
@@ -19,106 +20,103 @@ jobs:
           python-version: '3.12'
       - name: Install parser
         run: pip install requests beautifulsoup4 lxml
-      - name: Fetch TWSE, ETF and TPEx
+      - name: Fetch current-day TWSE and TPEx
         run: |
           python - <<'PY'
-          import json, re, datetime, requests
+          import json,re,time,datetime,requests
           from bs4 import BeautifulSoup
 
-          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.4'}
-          out={'updated_at': datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(), 'twse':[], 'tpex':[], 'errors':[]}
-
-          def get_retry(url, **kwargs):
-              last=None
-              for attempt in range(3):
-                  try:
-                      r=requests.get(url, **kwargs)
-                      r.raise_for_status()
-                      return r
-                  except Exception as e:
-                      last=e
-                      if attempt<2:
-                          import time
-                          time.sleep(2*(attempt+1))
-              raise last
+          TZ=datetime.timezone(datetime.timedelta(hours=8))
+          now=datetime.datetime.now(TZ)
+          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.4.1'}
+          out={'updated_at':now.isoformat(),'quote_date':None,'twse':[],'tpex':[],'errors':[]}
 
           def num(v):
-              if v is None: return None
+              if v is None:return None
               s=str(v).replace(',','').replace('+','').strip()
-              if s in ('','---','--'): return None
-              try: return float(s)
-              except: return None
+              if s in ('','---','--','--.--'):return None
+              try:return float(s)
+              except:return None
 
-          # TWSE OpenAPI：保留一般股票與 ETF/槓反 ETF 代碼。
+          def get(url,**kw):
+              last=None
+              for n in range(3):
+                  try:
+                      r=requests.get(url,**kw);r.raise_for_status();return r
+                  except Exception as e:
+                      last=e
+                      if n<2:time.sleep(2*(n+1))
+              raise last
+
+          # IMPORTANT:
+          # STOCK_DAY_ALL can lag one trading day. Use MI_INDEX for the requested
+          # trading date and overwrite the snapshot with that day's official data.
           try:
-              u='https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
-              r=requests.get(u,headers=headers,timeout=30); r.raise_for_status()
-              data=r.json()
-              for x in data:
-                  code=str(x.get('Code','')).strip().upper()
-                  # 4位股票、4~6位數ETF，以及 L/R/U 等字尾 ETF
-                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code): continue
-                  out['twse'].append({
-                    'code':code,'name':x.get('Name',''),'market':'上市',
-                    'close':num(x.get('ClosingPrice')),'open':num(x.get('OpeningPrice')),
-                    'high':num(x.get('HighestPrice')),'low':num(x.get('LowestPrice')),
-                    'volume':num(x.get('TradeVolume')),'value':num(x.get('TradeValue')),
-                    'change':num(x.get('Change'))
-                  })
-          except Exception as e: out['errors'].append('TWSE: '+repr(e))
-
-          # 若 OpenAPI 當日資料沒有固定 ETF，從 TWSE 盤後 MI_INDEX 補抓。
-          wanted={'0050','00685L'}
-          have={x['code'] for x in out['twse']}
-          missing=wanted-have
-          if missing:
+              date=now.strftime('%Y%m%d')
+              u='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
+              r=get(u,params={'date':date,'type':'ALL','response':'json'},headers=headers,timeout=40)
+              j=r.json()
+              if j.get('stat')!='OK':
+                  raise RuntimeError('MI_INDEX stat='+str(j.get('stat')))
+              found={}
+              for t in j.get('tables') or []:
+                  for row in t.get('data') or []:
+                      if not isinstance(row,list) or len(row)<9:continue
+                      code=str(row[0]).strip().upper()
+                      if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
+                      # Security quote table layout:
+                      # code,name,volume,trades,value,open,high,low,close,sign,change,...
+                      close=num(row[8])
+                      if close is None:continue
+                      sign=str(row[9]).strip() if len(row)>9 else ''
+                      change=num(row[10]) if len(row)>10 else None
+                      if change is not None and ('-' in sign or 'green' in sign.lower()):
+                          change=-abs(change)
+                      found[code]={
+                        'code':code,'name':str(row[1]).strip(),'market':'上市',
+                        'volume':num(row[2]),'value':num(row[4]),'open':num(row[5]),
+                        'high':num(row[6]),'low':num(row[7]),'close':close,'change':change
+                      }
+              if not found:raise RuntimeError('MI_INDEX returned no security quotes')
+              out['twse']=list(found.values())
+              out['quote_date']=now.strftime('%Y-%m-%d')
+          except Exception as e:
+              out['errors'].append('TWSE MI_INDEX: '+repr(e))
+              # Fallback only; mark date unknown so UI won't claim today's quote.
               try:
-                  date=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')
-                  u='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
-                  r=requests.get(u,params={'date':date,'type':'ALL','response':'json'},headers=headers,timeout=30)
-                  r.raise_for_status(); j=r.json()
-                  tables=j.get('tables') or []
-                  for t in tables:
-                      for row in t.get('data') or []:
-                          if not isinstance(row,list) or len(row)<9: continue
-                          code=str(row[0]).strip().upper()
-                          if code not in missing: continue
-                          sign=str(row[9]).strip() if len(row)>9 else ''
-                          delta=num(row[10]) if len(row)>10 else None
-                          if delta is not None and sign=='-': delta=-abs(delta)
-                          out['twse'].append({
-                            'code':code,'name':str(row[1]).strip(),'market':'上市',
-                            'volume':num(row[2]),'value':num(row[4]),
-                            'open':num(row[5]),'high':num(row[6]),'low':num(row[7]),
-                            'close':num(row[8]),'change':delta
-                          })
-                          missing.discard(code)
-              except Exception as e: out['errors'].append('TWSE ETF fallback: '+repr(e))
+                  u='https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
+                  data=get(u,headers=headers,timeout=30).json()
+                  for x in data:
+                      code=str(x.get('Code','')).strip().upper()
+                      if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
+                      out['twse'].append({
+                        'code':code,'name':x.get('Name',''),'market':'上市',
+                        'close':num(x.get('ClosingPrice')),'open':num(x.get('OpeningPrice')),
+                        'high':num(x.get('HighestPrice')),'low':num(x.get('LowestPrice')),
+                        'volume':num(x.get('TradeVolume')),'value':num(x.get('TradeValue')),
+                        'change':num(x.get('Change'))
+                      })
+              except Exception as e2:out['errors'].append('TWSE fallback: '+repr(e2))
 
           try:
               u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm'
-              r=get_retry(u,headers=headers,timeout=30)
-              soup=BeautifulSoup(r.text,'lxml')
-              table=soup.find('table')
-              if not table: raise RuntimeError('TPEx table not found')
-              rows=table.find_all('tr')
-              for tr in rows:
+              r=get(u,headers=headers,timeout=30)
+              soup=BeautifulSoup(r.text,'lxml');table=soup.find('table')
+              if not table:raise RuntimeError('TPEx table not found')
+              for tr in table.find_all('tr'):
                   td=[c.get_text(' ',strip=True) for c in tr.find_all('td')]
-                  if len(td)<10: continue
+                  if len(td)<10:continue
                   code=td[0].strip().upper()
-                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code): continue
-                  out['tpex'].append({
-                    'code':code,'name':td[1],'market':'上櫃','close':num(td[2]),
-                    'change':num(td[3]),'open':num(td[4]),'high':num(td[5]),'low':num(td[6]),
-                    'volume':num(td[8]),'value':num(td[9])
-                  })
-          except Exception as e: out['errors'].append('TPEx: '+repr(e))
+                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
+                  out['tpex'].append({'code':code,'name':td[1],'market':'上櫃',
+                    'close':num(td[2]),'change':num(td[3]),'open':num(td[4]),
+                    'high':num(td[5]),'low':num(td[6]),'volume':num(td[8]),'value':num(td[9])})
+          except Exception as e:out['errors'].append('TPEx: '+repr(e))
 
           with open('market.json','w',encoding='utf-8') as f:
               json.dump(out,f,ensure_ascii=False,separators=(',',':'))
-          print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'fixed ETF found',
-                [x['code'] for x in out['twse'] if x['code'] in ('0050','00685L')],
-                'errors',out['errors'])
+          watch={x['code']:x['close'] for x in out['twse'] if x['code'] in ('0050','00685L')}
+          print('quote_date',out['quote_date'],'watch',watch,'TWSE',len(out['twse']),'TPEx',len(out['tpex']),'errors',out['errors'])
           PY
       - name: Commit data
         run: |
@@ -126,5 +124,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add market.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update market data with ETF support"
+          git commit -m "Fix current-day market quotes V2.4.1"
           git push
