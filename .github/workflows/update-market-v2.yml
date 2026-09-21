@@ -15,12 +15,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.6.1 analysis
+      - name: Build V2.7 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.6.1'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.7'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
@@ -53,7 +53,7 @@ jobs:
             for m in months2():
               j=requests.get(u,params={'response':'json','date':m.strftime('%Y%m%d'),'stockNo':code},headers=H,timeout=25).json()
               for z in j.get('data',[]):
-                if len(z)>=9 and num(z[6]) is not None: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
+                if len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
               time.sleep(.04)
             return rows
           def tpex_hist(code):
@@ -63,12 +63,12 @@ jobs:
               try:
                 data=r.json().get('aaData') or r.json().get('data') or []
                 for z in data:
-                  if isinstance(z,list) and len(z)>=9 and num(z[6]) is not None: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
+                  if isinstance(z,list) and len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
               except:
                 s=BeautifulSoup(r.text,'lxml')
                 for tr in s.select('tr'):
                   z=[q.get_text(strip=True) for q in tr.select('td')]
-                  if len(z)>=9 and num(z[6]) is not None: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
+                  if len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
               time.sleep(.04)
             return rows
           picks=[]; fixed_results=[]; ready=0
@@ -77,7 +77,7 @@ jobs:
             try: hist=twse_hist(x['code']) if x['market']=='上市' else tpex_hist(x['code'])
             except: hist=[]
             if not hist or abs(hist[-1]['close']-x['close'])>1e-9:
-              hist.append({'close':x['close'],'high':x.get('high') or x['close'],'low':x.get('low') or x['close'],'volume':x.get('volume') or 0})
+              hist.append({'date':now.strftime('%Y/%m/%d'),'open':x.get('open') or x['close'],'close':x['close'],'high':x.get('high') or x['close'],'low':x.get('low') or x['close'],'volume':x.get('volume') or 0})
             c=[z['close'] for z in hist if z.get('close')]; v=[z.get('volume') or 0 for z in hist if z.get('close')]
             ma5=sma(c,5); ma20=sma(c,20)
             avgvol5=sum(v[-6:-1])/5 if len(v)>=6 else None
@@ -141,7 +141,7 @@ jobs:
             if action=='可觀察進場': summary='趨勢與量能偏強，且目前價格接近技術觀察區。'
             elif action=='等拉回': summary='趨勢仍偏強，但目前位置不適合追價，等待靠近觀察區。'
             else: summary='目前風險報酬條件較差，先不追價。'
-            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c)}
+            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c),'chart':hist[-40:]}
             if is_fixed:
               # 0~100 技術訊號強度：不是上漲機率，只是把趨勢與進場條件合成單一讀數。
               signal=round(strength*.45+entry*.55)
@@ -195,16 +195,16 @@ jobs:
             if score>=60: tomorrow.append(tz)
           tomorrow=sorted(tomorrow,key=lambda z:(z['tomorrow_score'],z['strength'],z['entry']),reverse=True)[:5]
           fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
-          out={'version':'2.6.1','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
+          out={'version':'2.7','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
           python /tmp/v2.py
-      - name: Commit V2.6.1 data
+      - name: Commit V2.7 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.6.1 analysis"
+          git commit -m "Update V2.7 analysis"
           git push
