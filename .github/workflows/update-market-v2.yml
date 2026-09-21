@@ -15,13 +15,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V3.0 full-market analysis
+      - name: Build V3.0.1 full-market analysis
         run: |
           cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
           from collections import defaultdict
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.0'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.0.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           S=requests.Session(); S.headers.update(H)
           def num(v):
@@ -159,19 +159,29 @@ jobs:
           fixed=[]
           for code in ['0050','00685L']:
             x=next((q for q in results if q['code']==code),None)
+            if not x and code=='00685L':
+              # 槓桿 ETF 含英文字母，不納入一般4碼股票池；用市場快照建立固定雷達。
+              q=latest.get(code)
+              if q and num(q.get('close')):
+                close=num(q.get('close')); ch=num(q.get('change')) or 0; prev=close-ch; pct=ch/prev*100 if prev else 0
+                x={'code':code,'name':q.get('name') or '群益臺灣加權正2','market':q.get('market') or '上市','close':close,'pct':pct,
+                   'strength':50,'entry':50,'action':'固定觀察','ma5':None,'ma20':None,'bias5':None,'bias20':None,'avgvol5':None,'avgvol20':None,
+                   'volume_ratio':None,'pos20':None,'breakout20':False,'entry_low':close*.97,'entry_high':close*1.01,'in_zone':True,'stop':close*.94,
+                   'plan_entry':close*.99,'plan_entry_low':close*.97,'plan_entry_high':close*1.01,'plan_stop':close*.94,
+                   'take_profit1':close*1.05,'take_profit2':close*1.09,'reasons':['固定ETF雷達'],'risks':['槓桿ETF波動較高'],'summary':'固定ETF行情觀察','hist_days':0}
             if x:
               x=dict(x); x['signal']=max(0,min(100,round(x['strength']*.45+x['entry']*.55)-(0 if x['in_zone'] else 8)-min(15,len(x['risks'])*5)))
               x['signal_label']='偏強' if x['signal']>=75 else ('中性' if x['signal']>=55 else '偏弱'); fixed.append(x)
-          out={'version':'3.0','updated_at':now.isoformat(),'universe':len(latest),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.0 全市場歷史掃描'}
+          out={'version':'3.0.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.0.1 全市場歷史掃描'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps({'version':'3.0','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
+          print(json.dumps({'version':'3.0.1','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
           PY
           python /tmp/v3.py
-      - name: Commit V3.0 data
+      - name: Commit V3.0.1 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.0 full-market analysis"
+          git commit -m "Update V3.0.1 full-market analysis"
           git push
