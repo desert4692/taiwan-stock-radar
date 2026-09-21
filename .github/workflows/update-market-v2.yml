@@ -14,12 +14,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.2 analysis
+      - name: Build V2.3 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.2'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.3'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
@@ -33,6 +33,16 @@ jobs:
             x['_pct']=ch/prev*100 if prev else 0
             x['_pre']=min(12,max(-5,x['_pct']))*5+min(30,(x.get('value') or 0)/1e8)
           cand=sorted([x for x in universe if x['close']>=5 and x['value']>=3e7 and x['_pct']>-1],key=lambda x:x['_pre'],reverse=True)[:70]
+          all_market=market.get('twse',[])+market.get('tpex',[])
+          fixed_codes=['0050','00685L']
+          fixed=[]
+          for code in fixed_codes:
+            z=next((q.copy() for q in all_market if str(q.get('code',''))==code),None)
+            if z:
+              ch=z.get('change') or 0; prev=z['close']-ch
+              z['_pct']=ch/prev*100 if prev else 0
+              z['_pre']=0
+              fixed.append(z)
           def months2():
             cur=now.replace(day=1); prev=(cur-datetime.timedelta(days=1)).replace(day=1)
             return [prev,cur]
@@ -59,8 +69,9 @@ jobs:
                   if len(z)>=9 and num(z[6]) is not None: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
               time.sleep(.04)
             return rows
-          picks=[]; ready=0
-          for x in cand:
+          picks=[]; fixed_results=[]; ready=0
+          work=[(x,False) for x in cand]+[(x,True) for x in fixed]
+          for x,is_fixed in work:
             try: hist=twse_hist(x['code']) if x['market']=='上市' else tpex_hist(x['code'])
             except: hist=[]
             if not hist or abs(hist[-1]['close']-x['close'])>1e-9:
@@ -113,27 +124,40 @@ jobs:
             if entry_low<=x['close']<=entry_high: in_zone=True
             lows=[z.get('low') for z in hist[-10:] if z.get('low')]
             stop=min(lows) if lows else min(c[-10:])
+            # ETF 固定雷達採較保守門檻；00685L 為槓桿 ETF，再提高進場要求。
+            if is_fixed:
+              lev=(str(x.get('code'))=='00685L')
+              if lev and (bias5 is not None and bias5>5):
+                entry-=10; risks.append('槓桿ETF乖離風險')
+              if lev and x['_pct']>=4:
+                entry-=8; risks.append('槓桿ETF單日波動偏大')
+              entry=max(0,min(100,round(entry)))
             if len(c)<20: action='資料不足'
-            elif strength>=72 and entry>=72 and in_zone: action='可觀察進場'
+            elif strength>=72 and entry>=(78 if is_fixed and str(x.get('code'))=='00685L' else 72) and in_zone: action='可觀察進場'
             elif strength>=65 and entry>=45: action='等拉回'
             else: action='不追'
             if action=='可觀察進場': summary='趨勢與量能偏強，且目前價格接近技術觀察區。'
             elif action=='等拉回': summary='趨勢仍偏強，但目前位置不適合追價，等待靠近觀察區。'
             else: summary='目前風險報酬條件較差，先不追價。'
-            picks.append({**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'reasons':reasons[:6],'risks':risks[:5],'summary':summary,'hist_days':len(c)})
+            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c)}
+            if is_fixed: fixed_results.append(item)
+            else: picks.append(item)
             time.sleep(.08)
           eligible=[z for z in picks if z['hist_days']>=20]
-          picks=sorted(eligible,key=lambda z:(z['strength']*.55+z['entry']*.45,z['entry']),reverse=True)[:5]
-          out={'version':'2.2','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'picks':picks,'note':'' if ready else '歷史行情尚未完整取得。'}
+          action_now=sorted([z for z in eligible if z['action']=='可觀察進場'],key=lambda z:(z['entry'],z['strength']),reverse=True)[:3]
+          wait=sorted([z for z in eligible if z['action']=='等拉回'],key=lambda z:(z['strength']*.55+z['entry']*.45),reverse=True)[:3]
+          avoid=sorted([z for z in eligible if z['action']=='不追'],key=lambda z:z['strength'],reverse=True)[:3]
+          fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
+          out={'version':'2.3','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
           python /tmp/v2.py
-      - name: Commit V2.2 data
+      - name: Commit V2.3 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.2 analysis"
+          git commit -m "Update V2.3 analysis"
           git push
