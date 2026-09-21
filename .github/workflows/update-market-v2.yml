@@ -15,12 +15,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.7 analysis
+      - name: Build V2.8 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.7'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.8'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
@@ -141,7 +141,15 @@ jobs:
             if action=='可觀察進場': summary='趨勢與量能偏強，且目前價格接近技術觀察區。'
             elif action=='等拉回': summary='趨勢仍偏強，但目前位置不適合追價，等待靠近觀察區。'
             else: summary='目前風險報酬條件較差，先不追價。'
-            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c),'chart':hist[-40:]}
+            # 交易計畫價位：技術規則產生，非保證成交或獲利。
+            plan_entry_low=entry_low
+            plan_entry_high=entry_high
+            plan_entry=(plan_entry_low+plan_entry_high)/2
+            plan_stop=min(stop, plan_entry*0.96)
+            risk_per_share=max(0.01,plan_entry-plan_stop)
+            take1=plan_entry+risk_per_share*1.5
+            take2=plan_entry+risk_per_share*2.5
+            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'plan_entry':plan_entry,'plan_entry_low':plan_entry_low,'plan_entry_high':plan_entry_high,'plan_stop':plan_stop,'take_profit1':take1,'take_profit2':take2,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c)}
             if is_fixed:
               # 0~100 技術訊號強度：不是上漲機率，只是把趨勢與進場條件合成單一讀數。
               signal=round(strength*.45+entry*.55)
@@ -195,16 +203,16 @@ jobs:
             if score>=60: tomorrow.append(tz)
           tomorrow=sorted(tomorrow,key=lambda z:(z['tomorrow_score'],z['strength'],z['entry']),reverse=True)[:5]
           fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
-          out={'version':'2.7','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
+          out={'version':'2.8','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
           python /tmp/v2.py
-      - name: Commit V2.7 data
+      - name: Commit V2.8 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.7 analysis"
+          git commit -m "Update V2.8 analysis"
           git push
