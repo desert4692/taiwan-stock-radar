@@ -3,8 +3,8 @@ name: Update Taiwan Market Data
 on:
   workflow_dispatch:
   schedule:
-    # UTC 01:10-05:40 = Taiwan 09:10-13:40, weekdays, every 30 min
-    - cron: '10,40 1-5 * * 1-5'
+    # UTC 01:10-05:40 = Taiwan 09:10-13:40, weekdays, every 10 min
+    - cron: '0,10,20,30,40,50 1-5 * * 1-5'
 
 permissions:
   contents: write
@@ -25,8 +25,22 @@ jobs:
           import json, re, datetime, requests
           from bs4 import BeautifulSoup
 
-          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.3.2'}
+          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.4'}
           out={'updated_at': datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(), 'twse':[], 'tpex':[], 'errors':[]}
+
+          def get_retry(url, **kwargs):
+              last=None
+              for attempt in range(3):
+                  try:
+                      r=requests.get(url, **kwargs)
+                      r.raise_for_status()
+                      return r
+                  except Exception as e:
+                      last=e
+                      if attempt<2:
+                          import time
+                          time.sleep(2*(attempt+1))
+              raise last
 
           def num(v):
               if v is None: return None
@@ -83,7 +97,7 @@ jobs:
 
           try:
               u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm'
-              r=requests.get(u,headers=headers,timeout=30); r.raise_for_status()
+              r=get_retry(u,headers=headers,timeout=30)
               soup=BeautifulSoup(r.text,'lxml')
               table=soup.find('table')
               if not table: raise RuntimeError('TPEx table not found')
