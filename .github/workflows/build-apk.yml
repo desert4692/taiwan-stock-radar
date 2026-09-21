@@ -1,0 +1,212 @@
+name: Build Stock Radar APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p apkapp/app/src/main/java/com/desert4692/taiwanstockradar
+          mkdir -p apkapp/app/src/main/res/values
+          mkdir -p apkapp/app/src/main/res/drawable
+          mkdir -p apkapp/app/src/main/res/mipmap-anydpi-v26
+
+          cat > apkapp/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "TaiwanStockRadar"
+          include(":app")
+          EOF
+
+          cat > apkapp/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > apkapp/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.desert4692.taiwanstockradar'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.desert4692.taiwanstockradar"
+                  minSdk 24
+                  targetSdk 35
+                  versionCode 1
+                  versionName "1.0"
+              }
+          }
+          EOF
+
+          cat > apkapp/app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="Theme.StockRadar" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#08111F</item>
+                  <item name="android:navigationBarColor">#08111F</item>
+                  <item name="android:colorAccent">#42E695</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > apkapp/app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#08111F" android:pathData="M0,0h108v108h-108z"/>
+              <path android:strokeColor="#63F3A8" android:strokeWidth="6"
+                  android:strokeLineCap="round" android:strokeLineJoin="round"
+                  android:fillColor="@android:color/transparent"
+                  android:pathData="M20,76 L38,57 L51,66 L72,39 L88,48"/>
+              <path android:fillColor="#63F3A8"
+                  android:pathData="M82,35 L94,35 L94,47z"/>
+          </vector>
+          EOF
+
+          cat > apkapp/app/src/main/res/drawable/ic_launcher_background.xml <<'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android"
+              android:shape="rectangle">
+              <solid android:color="#08111F"/>
+          </shape>
+          EOF
+
+          cat > apkapp/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+
+          cp apkapp/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml \
+             apkapp/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          cat > apkapp/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application
+                  android:allowBackup="true"
+                  android:label="台股決策雷達"
+                  android:theme="@style/Theme.StockRadar"
+                  android:usesCleartextTraffic="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > apkapp/app/src/main/java/com/desert4692/taiwanstockradar/MainActivity.java <<'EOF'
+          package com.desert4692.taiwanstockradar;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.graphics.Color;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+              private static final String HOME =
+                  "https://desert4692.github.io/taiwan-stock-radar/";
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  getWindow().setStatusBarColor(Color.rgb(8,17,31));
+                  getWindow().setNavigationBarColor(Color.rgb(8,17,31));
+
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setBuiltInZoomControls(false);
+                  settings.setDisplayZoomControls(false);
+
+                  webView.setWebViewClient(new WebViewClient());
+
+                  if (savedInstanceState == null) {
+                      webView.loadUrl(HOME);
+                  } else {
+                      webView.restoreState(savedInstanceState);
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              @Override
+              protected void onSaveInstanceState(Bundle outState) {
+                  webView.saveState(outState);
+                  super.onSaveInstanceState(outState);
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        working-directory: apkapp
+        run: gradle assembleDebug
+
+      - name: Rename APK
+        run: cp apkapp/app/build/outputs/apk/debug/app-debug.apk 台股決策雷達.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Taiwan-Stock-Radar-APK
+          path: 台股決策雷達.apk
+          retention-days: 30
