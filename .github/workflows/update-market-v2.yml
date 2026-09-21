@@ -14,12 +14,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.3 analysis
+      - name: Build V2.3.1 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.3'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.3.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
@@ -37,8 +37,9 @@ jobs:
           fixed_codes=['0050','00685L']
           fixed=[]
           for code in fixed_codes:
-            z=next((q.copy() for q in all_market if str(q.get('code',''))==code),None)
-            if z:
+            # 固定 ETF 不受「4位純數字個股」篩選限制，直接從完整市場快照尋找。
+            z=next((q.copy() for q in all_market if str(q.get('code','')).upper()==code),None)
+            if z and z.get('close'):
               ch=z.get('change') or 0; prev=z['close']-ch
               z['_pct']=ch/prev*100 if prev else 0
               z['_pre']=0
@@ -148,16 +149,16 @@ jobs:
           wait=sorted([z for z in eligible if z['action']=='等拉回'],key=lambda z:(z['strength']*.55+z['entry']*.45),reverse=True)[:3]
           avoid=sorted([z for z in eligible if z['action']=='不追'],key=lambda z:z['strength'],reverse=True)[:3]
           fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
-          out={'version':'2.3','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
+          out={'version':'2.3.1','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
           python /tmp/v2.py
-      - name: Commit V2.3 data
+      - name: Commit V2.3.1 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.3 analysis"
+          git commit -m "Update V2.3.1 analysis"
           git push
