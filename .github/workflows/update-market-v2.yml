@@ -15,12 +15,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.6 analysis
+      - name: Build V2.6.1 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.6'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.6.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
@@ -185,22 +185,26 @@ jobs:
             tz['tomorrow_label']='優先觀察' if score>=75 else ('觀察' if score>=60 else '低優先')
             tz['tomorrow_low']=base*0.995
             tz['tomorrow_high']=base*1.03
+            # B 路徑：突破今日高點後才觀察；no_chase 是隔日跳空/追價上限。
+            day_high=x.get('high') or z['close']
+            tz['breakout_price']=max(z['close'],day_high)*1.002
+            tz['no_chase_price']=z['close']*1.035
             tz['tomorrow_reasons']=why[:5]
             tz['tomorrow_risks']=trisk[:4]
-            tz['tomorrow_plan']='明日若落在觀察區且未跌破轉弱價，可再觀察量價；若明顯跳空高於區間，不追價。'
+            tz['tomorrow_plan']='A 拉回：進入觀察區且守住轉弱價再觀察。B 突破：站上突破價且量能延續再觀察。若開盤或盤中高於不追價，放棄追價。'
             if score>=60: tomorrow.append(tz)
           tomorrow=sorted(tomorrow,key=lambda z:(z['tomorrow_score'],z['strength'],z['entry']),reverse=True)[:5]
           fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
-          out={'version':'2.6','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
+          out={'version':'2.6.1','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
           python /tmp/v2.py
-      - name: Commit V2.6 data
+      - name: Commit V2.6.1 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.6 analysis"
+          git commit -m "Update V2.6.1 analysis"
           git push
