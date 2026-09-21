@@ -19,13 +19,13 @@ jobs:
           python-version: '3.12'
       - name: Install parser
         run: pip install requests beautifulsoup4 lxml
-      - name: Fetch TWSE and TPEx
+      - name: Fetch TWSE, ETF and TPEx
         run: |
           python - <<'PY'
           import json, re, datetime, requests
           from bs4 import BeautifulSoup
 
-          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/1.0'}
+          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.3.2'}
           out={'updated_at': datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(), 'twse':[], 'tpex':[], 'errors':[]}
 
           def num(v):
@@ -35,13 +35,15 @@ jobs:
               try: return float(s)
               except: return None
 
+          # TWSE OpenAPI：保留一般股票與 ETF/槓反 ETF 代碼。
           try:
               u='https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
               r=requests.get(u,headers=headers,timeout=30); r.raise_for_status()
               data=r.json()
               for x in data:
-                  code=str(x.get('Code','')).strip()
-                  if not re.fullmatch(r'\d{4}',code): continue
+                  code=str(x.get('Code','')).strip().upper()
+                  # 4位股票、4~6位數ETF，以及 L/R/U 等字尾 ETF
+                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code): continue
                   out['twse'].append({
                     'code':code,'name':x.get('Name',''),'market':'上市',
                     'close':num(x.get('ClosingPrice')),'open':num(x.get('OpeningPrice')),
@@ -50,6 +52,34 @@ jobs:
                     'change':num(x.get('Change'))
                   })
           except Exception as e: out['errors'].append('TWSE: '+repr(e))
+
+          # 若 OpenAPI 當日資料沒有固定 ETF，從 TWSE 盤後 MI_INDEX 補抓。
+          wanted={'0050','00685L'}
+          have={x['code'] for x in out['twse']}
+          missing=wanted-have
+          if missing:
+              try:
+                  date=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')
+                  u='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
+                  r=requests.get(u,params={'date':date,'type':'ALL','response':'json'},headers=headers,timeout=30)
+                  r.raise_for_status(); j=r.json()
+                  tables=j.get('tables') or []
+                  for t in tables:
+                      for row in t.get('data') or []:
+                          if not isinstance(row,list) or len(row)<9: continue
+                          code=str(row[0]).strip().upper()
+                          if code not in missing: continue
+                          sign=str(row[9]).strip() if len(row)>9 else ''
+                          delta=num(row[10]) if len(row)>10 else None
+                          if delta is not None and sign=='-': delta=-abs(delta)
+                          out['twse'].append({
+                            'code':code,'name':str(row[1]).strip(),'market':'上市',
+                            'volume':num(row[2]),'value':num(row[4]),
+                            'open':num(row[5]),'high':num(row[6]),'low':num(row[7]),
+                            'close':num(row[8]),'change':delta
+                          })
+                          missing.discard(code)
+              except Exception as e: out['errors'].append('TWSE ETF fallback: '+repr(e))
 
           try:
               u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm'
@@ -61,8 +91,8 @@ jobs:
               for tr in rows:
                   td=[c.get_text(' ',strip=True) for c in tr.find_all('td')]
                   if len(td)<10: continue
-                  code=td[0].strip()
-                  if not re.fullmatch(r'\d{4}',code): continue
+                  code=td[0].strip().upper()
+                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code): continue
                   out['tpex'].append({
                     'code':code,'name':td[1],'market':'上櫃','close':num(td[2]),
                     'change':num(td[3]),'open':num(td[4]),'high':num(td[5]),'low':num(td[6]),
@@ -72,7 +102,9 @@ jobs:
 
           with open('market.json','w',encoding='utf-8') as f:
               json.dump(out,f,ensure_ascii=False,separators=(',',':'))
-          print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'errors',out['errors'])
+          print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'fixed ETF found',
+                [x['code'] for x in out['twse'] if x['code'] in ('0050','00685L')],
+                'errors',out['errors'])
           PY
       - name: Commit data
         run: |
@@ -80,5 +112,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add market.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update market data"
+          git commit -m "Update market data with ETF support"
           git push
