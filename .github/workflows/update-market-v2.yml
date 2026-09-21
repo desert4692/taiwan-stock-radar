@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V2
+name: Update Taiwan Market Data V3
 on:
   workflow_dispatch:
   schedule:
@@ -15,204 +15,163 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2.8 analysis
+      - name: Build V3.0 full-market analysis
         run: |
-          cat > /tmp/v2.py <<'PY'
+          cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.8'}
+          from collections import defaultdict
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.0'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
+          S=requests.Session(); S.headers.update(H)
           def num(v):
             try:return float(str(v).replace(',','').replace('+','').strip())
             except:return None
           def sma(a,n): return sum(a[-n:])/n if len(a)>=n else None
           try: market=json.load(open('market.json',encoding='utf8'))
           except: market={'twse':[],'tpex':[]}
-          universe=[x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('close') and x.get('value') and re.fullmatch(r'\d{4}',str(x.get('code','')))]
-          for x in universe:
-            ch=x.get('change') or 0; prev=x['close']-ch
-            x['_pct']=ch/prev*100 if prev else 0
-            x['_pre']=min(12,max(-5,x['_pct']))*5+min(30,(x.get('value') or 0)/1e8)
-          cand=sorted([x for x in universe if x['close']>=5 and x['value']>=3e7 and x['_pct']>-1],key=lambda x:x['_pre'],reverse=True)[:70]
-          all_market=market.get('twse',[])+market.get('tpex',[])
-          fixed_codes=['0050','00685L']
-          fixed=[]
-          for code in fixed_codes:
-            # 固定 ETF 不受「4位純數字個股」篩選限制，直接從完整市場快照尋找。
-            z=next((q.copy() for q in all_market if str(q.get('code','')).upper()==code),None)
-            if z and z.get('close'):
-              ch=z.get('change') or 0; prev=z['close']-ch
-              z['_pct']=ch/prev*100 if prev else 0
-              z['_pre']=0
-              fixed.append(z)
-          def months2():
-            cur=now.replace(day=1); prev=(cur-datetime.timedelta(days=1)).replace(day=1)
-            return [prev,cur]
-          def twse_hist(code):
-            rows=[]; u='https://www.twse.com.tw/exchangeReport/STOCK_DAY'
-            for m in months2():
-              j=requests.get(u,params={'response':'json','date':m.strftime('%Y%m%d'),'stockNo':code},headers=H,timeout=25).json()
-              for z in j.get('data',[]):
-                if len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
-              time.sleep(.04)
-            return rows
-          def tpex_hist(code):
-            rows=[]; u='https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php'
-            for m in months2():
-              d=f'{m.year-1911}/{m.month:02d}'; r=requests.get(u,params={'l':'zh-tw','d':d,'stkno':code},headers=H,timeout=25)
-              try:
-                data=r.json().get('aaData') or r.json().get('data') or []
-                for z in data:
-                  if isinstance(z,list) and len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
-              except:
-                s=BeautifulSoup(r.text,'lxml')
-                for tr in s.select('tr'):
-                  z=[q.get_text(strip=True) for q in tr.select('td')]
-                  if len(z)>=9 and num(z[6]) is not None: rows.append({'date':str(z[0]),'open':num(z[3]),'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
-              time.sleep(.04)
-            return rows
-          picks=[]; fixed_results=[]; ready=0
-          work=[(x,False) for x in cand]+[(x,True) for x in fixed]
-          for x,is_fixed in work:
-            try: hist=twse_hist(x['code']) if x['market']=='上市' else tpex_hist(x['code'])
-            except: hist=[]
-            if not hist or abs(hist[-1]['close']-x['close'])>1e-9:
-              hist.append({'date':now.strftime('%Y/%m/%d'),'open':x.get('open') or x['close'],'close':x['close'],'high':x.get('high') or x['close'],'low':x.get('low') or x['close'],'volume':x.get('volume') or 0})
-            c=[z['close'] for z in hist if z.get('close')]; v=[z.get('volume') or 0 for z in hist if z.get('close')]
+          latest={str(x.get('code')):x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('code')}
+          histories=defaultdict(list)
+
+          def add(code,date,o,h,l,c,v,market_name):
+            if not re.fullmatch(r'\d{4}',code): return
+            if c is None: return
+            histories[code].append({'date':date,'open':o,'high':h,'low':l,'close':c,'volume':v or 0,'market':market_name})
+
+          def twse_day(d):
+            u='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
+            j=S.get(u,params={'date':d.strftime('%Y%m%d'),'type':'ALLBUT0999','response':'json'},timeout=30).json()
+            for tb in j.get('tables',[]):
+              fs=tb.get('fields') or []; data=tb.get('data') or []
+              if '證券代號' not in fs or '收盤價' not in fs: continue
+              idx={k:i for i,k in enumerate(fs)}
+              for z in data:
+                try:
+                  code=str(z[idx['證券代號']]).strip()
+                  add(code,d.isoformat(),num(z[idx.get('開盤價')]),num(z[idx.get('最高價')]),num(z[idx.get('最低價')]),num(z[idx['收盤價']]),num(z[idx.get('成交股數')]),'上市')
+                except: pass
+
+          def tpex_day(d):
+            roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
+            u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php'
+            r=S.get(u,params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
+            s=BeautifulSoup(r.text,'lxml')
+            for tr in s.select('tr'):
+              z=[q.get_text(strip=True) for q in tr.select('td')]
+              if len(z)>=10:
+                code=z[0].strip()
+                if re.fullmatch(r'\d{4}',code):
+                  add(code,d.isoformat(),num(z[4]),num(z[5]),num(z[6]),num(z[2]),num(z[8]),'上櫃')
+
+          # 約 50 個日曆日，通常可取得 30+ 個交易日；全市場每天各抓一次。
+          start=now.date()-datetime.timedelta(days=55)
+          d=start; ok_twse=ok_tpex=0
+          while d<=now.date():
+            if d.weekday()<5:
+              try: twse_day(d); ok_twse+=1
+              except Exception as e: print('TWSE',d,e)
+              try: tpex_day(d); ok_tpex+=1
+              except Exception as e: print('TPEx',d,e)
+              time.sleep(.08)
+            d+=datetime.timedelta(days=1)
+
+          results=[]
+          for code,hist in histories.items():
+            hist=sorted(hist,key=lambda z:z['date'])
+            # 去重日期
+            hist=list({z['date']:z for z in hist}.values()); hist=sorted(hist,key=lambda z:z['date'])
+            if len(hist)<20: continue
+            x=latest.get(code,{})
+            close=num(x.get('close')) or hist[-1]['close']
+            if close<5: continue
+            value=num(x.get('value')) or 0
+            if value<3e7: continue
+            ch=num(x.get('change')) or 0; prev=close-ch
+            pct=ch/prev*100 if prev else 0
+            c=[z['close'] for z in hist]; v=[z['volume'] for z in hist]
             ma5=sma(c,5); ma20=sma(c,20)
-            avgvol5=sum(v[-6:-1])/5 if len(v)>=6 else None
-            avgvol20=sum(v[-21:-1])/20 if len(v)>=21 else None
-            vr=v[-1]/avgvol5 if avgvol5 else None
-            h20=max(c[-20:]) if len(c)>=20 else max(c); l20=min(c[-20:]) if len(c)>=20 else min(c)
-            pos=(x['close']-l20)/(h20-l20)*100 if h20>l20 else 50
-            bias5=(x['close']/ma5-1)*100 if ma5 else None
-            bias20=(x['close']/ma20-1)*100 if ma20 else None
-            prev20=max(c[-21:-1]) if len(c)>=21 else None
-            breakout=bool(prev20 and x['close']>=prev20)
+            av5=sum(v[-6:-1])/5 if len(v)>=6 else None
+            av20=sum(v[-21:-1])/20 if len(v)>=21 else None
+            vr=v[-1]/av5 if av5 else None
+            h20=max(c[-20:]); l20=min(c[-20:])
+            pos=(close-l20)/(h20-l20)*100 if h20>l20 else 50
+            b5=(close/ma5-1)*100 if ma5 else None; b20=(close/ma20-1)*100 if ma20 else None
+            prev20=max(c[-21:-1]) if len(c)>=21 else None; breakout=bool(prev20 and close>=prev20)
             strength=40; reasons=[]; risks=[]
-            if ma5 and x['close']>ma5: strength+=12; reasons.append('站上5MA')
-            if ma20 and x['close']>ma20: strength+=15; reasons.append('站上20MA')
-            if ma5 and ma20 and ma5>ma20: strength+=12; reasons.append('短均線多頭')
+            if close>ma5: strength+=12; reasons.append('站上5MA')
+            if close>ma20: strength+=15; reasons.append('站上20MA')
+            if ma5>ma20: strength+=12; reasons.append('短均線多頭')
             if vr and vr>=1.5: strength+=12; reasons.append(f'量比{vr:.1f}×')
             if breakout: strength+=12; reasons.append('突破20日高')
-            if x['_pct']>2: strength+=7; reasons.append('當日動能偏強')
+            if pct>2: strength+=7; reasons.append('當日動能偏強')
             strength=max(0,min(100,round(strength)))
             entry=55
-            if bias5 is not None:
-              if -1<=bias5<=3.5: entry+=18; reasons.append('貼近5MA')
-              elif bias5<=6: entry+=8
-              elif bias5>10: entry-=22; risks.append('距5MA過遠')
-              elif bias5>7: entry-=12; risks.append('5MA乖離偏大')
-            if bias20 is not None:
-              if 0<=bias20<=8: entry+=12
-              elif bias20>15: entry-=22; risks.append('20MA乖離過大')
-              elif bias20>10: entry-=10; risks.append('20MA乖離偏大')
-            if vr:
-              if 1.1<=vr<=3.0: entry+=8
-              elif vr>5: entry-=12; risks.append('爆量過熱')
-              elif vr>3.5: entry-=6; risks.append('量能偏熱')
-            if pos>=98:
-              entry-=10; risks.append('位於20日高檔')
-            if x['_pct']>=9:
-              entry-=20; risks.append('單日漲幅過大')
-            elif x['_pct']>=6:
-              entry-=10; risks.append('短線漲幅偏大')
-            if breakout and bias5 is not None and bias5<=5 and x['_pct']<6: entry+=8
+            if -1<=b5<=3.5: entry+=18; reasons.append('貼近5MA')
+            elif b5<=6: entry+=8
+            elif b5>10: entry-=22; risks.append('距5MA過遠')
+            elif b5>7: entry-=12; risks.append('5MA乖離偏大')
+            if 0<=b20<=8: entry+=12
+            elif b20>15: entry-=22; risks.append('20MA乖離過大')
+            elif b20>10: entry-=10; risks.append('20MA乖離偏大')
+            if vr and 1.1<=vr<=3: entry+=8
+            elif vr and vr>5: entry-=12; risks.append('爆量過熱')
+            elif vr and vr>3.5: entry-=6; risks.append('量能偏熱')
+            if pos>=98: entry-=10; risks.append('位於20日高檔')
+            if pct>=9: entry-=20; risks.append('單日漲幅過大')
+            elif pct>=6: entry-=10; risks.append('短線漲幅偏大')
+            if breakout and b5<=5 and pct<6: entry+=8
             entry=max(0,min(100,round(entry)))
-            if len(c)>=20: ready+=1
-            in_zone=False
-            base=ma5 or x['close']
-            entry_low=base*0.99; entry_high=base*1.025
-            if entry_low<=x['close']<=entry_high: in_zone=True
-            lows=[z.get('low') for z in hist[-10:] if z.get('low')]
-            stop=min(lows) if lows else min(c[-10:])
-            # ETF 固定雷達採較保守門檻；00685L 為槓桿 ETF，再提高進場要求。
-            if is_fixed:
-              lev=(str(x.get('code'))=='00685L')
-              if lev and (bias5 is not None and bias5>5):
-                entry-=10; risks.append('槓桿ETF乖離風險')
-              if lev and x['_pct']>=4:
-                entry-=8; risks.append('槓桿ETF單日波動偏大')
-              entry=max(0,min(100,round(entry)))
-            if len(c)<20: action='資料不足'
-            elif strength>=72 and entry>=(78 if is_fixed and str(x.get('code'))=='00685L' else 72) and in_zone: action='可觀察進場'
-            elif strength>=65 and entry>=45: action='等拉回'
-            else: action='不追'
-            if action=='可觀察進場': summary='趨勢與量能偏強，且目前價格接近技術觀察區。'
-            elif action=='等拉回': summary='趨勢仍偏強，但目前位置不適合追價，等待靠近觀察區。'
-            else: summary='目前風險報酬條件較差，先不追價。'
-            # 交易計畫價位：技術規則產生，非保證成交或獲利。
-            plan_entry_low=entry_low
-            plan_entry_high=entry_high
-            plan_entry=(plan_entry_low+plan_entry_high)/2
-            plan_stop=min(stop, plan_entry*0.96)
-            risk_per_share=max(0.01,plan_entry-plan_stop)
-            take1=plan_entry+risk_per_share*1.5
-            take2=plan_entry+risk_per_share*2.5
-            item={**{k:x.get(k) for k in ('code','name','market','close')},'pct':x['_pct'],'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':bias5,'bias20':bias20,'avgvol5':avgvol5,'avgvol20':avgvol20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':entry_low,'entry_high':entry_high,'in_zone':in_zone,'stop':stop,'plan_entry':plan_entry,'plan_entry_low':plan_entry_low,'plan_entry_high':plan_entry_high,'plan_stop':plan_stop,'take_profit1':take1,'take_profit2':take2,'reasons':reasons[:6],'risks':risks[:6],'summary':summary,'hist_days':len(c)}
-            if is_fixed:
-              # 0~100 技術訊號強度：不是上漲機率，只是把趨勢與進場條件合成單一讀數。
-              signal=round(strength*.45+entry*.55)
-              if not in_zone: signal-=8
-              if risks: signal-=min(15,len(risks)*5)
-              item['signal']=max(0,min(100,signal))
-              item['signal_label']='偏強' if item['signal']>=75 else ('中性' if item['signal']>=55 else '偏弱')
-              fixed_results.append(item)
-            else: picks.append(item)
-            time.sleep(.08)
-          eligible=[z for z in picks if z['hist_days']>=20]
-          action_now=sorted([z for z in eligible if z['action']=='可觀察進場'],key=lambda z:(z['entry'],z['strength']),reverse=True)[:5]
-          wait=sorted([z for z in eligible if z['action']=='等拉回'],key=lambda z:(z['strength']*.55+z['entry']*.45),reverse=True)[:3]
-          avoid=sorted([z for z in eligible if z['action']=='不追'],key=lambda z:z['strength'],reverse=True)[:3]
-          # 收盤後明日觀察：技術條件排序，不代表隔日上漲機率。
+            low=ma5*.99; high=ma5*1.025; in_zone=low<=close<=high
+            lows=[z['low'] for z in hist[-10:] if z.get('low')]; stop=min(lows) if lows else min(c[-10:])
+            plan=(low+high)/2; plan_stop=min(stop,plan*.96); risk=max(.01,plan-plan_stop)
+            action='可觀察進場' if strength>=72 and entry>=72 and in_zone else ('等拉回' if strength>=65 and entry>=45 else '不追')
+            item={'code':code,'name':x.get('name') or code,'market':x.get('market') or hist[-1]['market'],'close':close,'pct':pct,'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':b5,'bias20':b20,'avgvol5':av5,'avgvol20':av20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,'in_zone':in_zone,'stop':stop,'plan_entry':plan,'plan_entry_low':low,'plan_entry_high':high,'plan_stop':plan_stop,'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'reasons':reasons[:6],'risks':risks[:6],'summary':'全市場歷史資料技術評分','hist_days':len(hist)}
+            results.append(item)
+
+          action_now=sorted([z for z in results if z['action']=='可觀察進場'],key=lambda z:(z['entry'],z['strength']),reverse=True)[:5]
           tomorrow=[]
-          for z in eligible:
-            score=0; why=[]; trisk=[]
-            if z.get('ma5') and z['close']>z['ma5']: score+=18; why.append('收盤站上5MA')
-            if z.get('ma20') and z['close']>z['ma20']: score+=18; why.append('收盤站上20MA')
-            if z.get('ma5') and z.get('ma20') and z['ma5']>z['ma20']: score+=14; why.append('短均線多頭')
-            vr=z.get('volume_ratio')
-            if vr and 1.1<=vr<=3.0: score+=15; why.append(f'量能健康 {vr:.1f}×')
-            elif vr and vr>4: score-=12; trisk.append('爆量過熱')
-            if z.get('breakout20'): score+=12; why.append('突破20日高')
-            b5=z.get('bias5')
-            if b5 is not None:
-              if -1<=b5<=4: score+=15; why.append('距5MA不遠')
-              elif b5>8: score-=18; trisk.append('5MA乖離偏大')
-              elif b5>6: score-=10; trisk.append('短線乖離偏高')
-            pct=z.get('pct') or 0
-            if 0<pct<5: score+=8; why.append('當日動能適中')
-            elif pct>=9: score-=25; trisk.append('單日漲幅過大')
-            elif pct>=6: score-=12; trisk.append('短線漲幅偏大')
-            if (z.get('pos20') or 0)>=98 and (b5 or 0)>4:
-              score-=10; trisk.append('20日高檔追價風險')
+          for z in results:
+            score=0; why=[]; tr=[]
+            if z['close']>z['ma5']: score+=18; why.append('收盤站上5MA')
+            if z['close']>z['ma20']: score+=18; why.append('收盤站上20MA')
+            if z['ma5']>z['ma20']: score+=14; why.append('短均線多頭')
+            vr=z['volume_ratio']
+            if vr and 1.1<=vr<=3: score+=15; why.append(f'量能健康 {vr:.1f}×')
+            elif vr and vr>4: score-=12; tr.append('爆量過熱')
+            if z['breakout20']: score+=12; why.append('突破20日高')
+            b=z['bias5']
+            if -1<=b<=4: score+=15; why.append('距5MA不遠')
+            elif b>8: score-=18; tr.append('5MA乖離偏大')
+            elif b>6: score-=10; tr.append('短線乖離偏高')
+            if 0<z['pct']<5: score+=8; why.append('當日動能適中')
+            elif z['pct']>=9: score-=25; tr.append('單日漲幅過大')
+            elif z['pct']>=6: score-=12; tr.append('短線漲幅偏大')
+            if z['pos20']>=98 and b>4: score-=10; tr.append('20日高檔追價風險')
             score=max(0,min(100,round(score)))
-            base=z.get('ma5') or z['close']
-            tz=dict(z)
-            tz['tomorrow_score']=score
-            tz['tomorrow_label']='優先觀察' if score>=75 else ('觀察' if score>=60 else '低優先')
-            tz['tomorrow_low']=base*0.995
-            tz['tomorrow_high']=base*1.03
-            # B 路徑：突破今日高點後才觀察；no_chase 是隔日跳空/追價上限。
-            day_high=x.get('high') or z['close']
-            tz['breakout_price']=max(z['close'],day_high)*1.002
-            tz['no_chase_price']=z['close']*1.035
-            tz['tomorrow_reasons']=why[:5]
-            tz['tomorrow_risks']=trisk[:4]
-            tz['tomorrow_plan']='A 拉回：進入觀察區且守住轉弱價再觀察。B 突破：站上突破價且量能延續再觀察。若開盤或盤中高於不追價，放棄追價。'
-            if score>=60: tomorrow.append(tz)
+            if score>=60:
+              q=dict(z); q['tomorrow_score']=score;q['tomorrow_label']='優先觀察' if score>=75 else '觀察'
+              q['tomorrow_low']=z['ma5']*.995;q['tomorrow_high']=z['ma5']*1.03
+              q['breakout_price']=z['close']*1.002;q['no_chase_price']=z['close']*1.035
+              q['tomorrow_reasons']=why[:5];q['tomorrow_risks']=tr[:4]
+              q['tomorrow_plan']='A 拉回：進入觀察區且守住轉弱價再觀察。B 突破：站上突破價且量能延續再觀察。'
+              tomorrow.append(q)
           tomorrow=sorted(tomorrow,key=lambda z:(z['tomorrow_score'],z['strength'],z['entry']),reverse=True)[:5]
-          fixed_results=sorted(fixed_results,key=lambda z: fixed_codes.index(str(z['code'])) if str(z['code']) in fixed_codes else 99)
-          out={'version':'2.8','updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'fixed_etfs':fixed_results,'action_now':action_now,'tomorrow_watch':tomorrow,'wait':wait,'avoid':avoid,'picks':action_now+wait,'note':'' if ready else '歷史行情尚未完整取得。'}
+          fixed=[]
+          for code in ['0050','00685L']:
+            x=next((q for q in results if q['code']==code),None)
+            if x:
+              x=dict(x); x['signal']=max(0,min(100,round(x['strength']*.45+x['entry']*.55)-(0 if x['in_zone'] else 8)-min(15,len(x['risks'])*5)))
+              x['signal_label']='偏強' if x['signal']>=75 else ('中性' if x['signal']>=55 else '偏弱'); fixed.append(x)
+          out={'version':'3.0','updated_at':now.isoformat(),'universe':len(latest),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.0 全市場歷史掃描'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps(out,ensure_ascii=False,indent=2))
+          print(json.dumps({'version':'3.0','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
           PY
-          python /tmp/v2.py
-      - name: Commit V2.8 data
+          python /tmp/v3.py
+      - name: Commit V3.0 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2.8 analysis"
+          git commit -m "Update V3.0 full-market analysis"
           git push
