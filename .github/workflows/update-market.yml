@@ -1,0 +1,84 @@
+name: Update Taiwan Market Data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 01:10-05:40 = Taiwan 09:10-13:40, weekdays, every 30 min
+    - cron: '10,40 1-5 * * 1-5'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install parser
+        run: pip install requests beautifulsoup4 lxml
+      - name: Fetch TWSE and TPEx
+        run: |
+          python - <<'PY'
+          import json, re, datetime, requests
+          from bs4 import BeautifulSoup
+
+          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/1.0'}
+          out={'updated_at': datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(), 'twse':[], 'tpex':[], 'errors':[]}
+
+          def num(v):
+              if v is None: return None
+              s=str(v).replace(',','').replace('+','').strip()
+              if s in ('','---','--'): return None
+              try: return float(s)
+              except: return None
+
+          try:
+              u='https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
+              r=requests.get(u,headers=headers,timeout=30); r.raise_for_status()
+              data=r.json()
+              for x in data:
+                  code=str(x.get('Code','')).strip()
+                  if not re.fullmatch(r'\d{4}',code): continue
+                  out['twse'].append({
+                    'code':code,'name':x.get('Name',''),'market':'上市',
+                    'close':num(x.get('ClosingPrice')),'open':num(x.get('OpeningPrice')),
+                    'high':num(x.get('HighestPrice')),'low':num(x.get('LowestPrice')),
+                    'volume':num(x.get('TradeVolume')),'value':num(x.get('TradeValue')),
+                    'change':num(x.get('Change'))
+                  })
+          except Exception as e: out['errors'].append('TWSE: '+repr(e))
+
+          try:
+              u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm'
+              r=requests.get(u,headers=headers,timeout=30); r.raise_for_status()
+              soup=BeautifulSoup(r.text,'lxml')
+              table=soup.find('table')
+              if not table: raise RuntimeError('TPEx table not found')
+              rows=table.find_all('tr')
+              for tr in rows:
+                  td=[c.get_text(' ',strip=True) for c in tr.find_all('td')]
+                  if len(td)<10: continue
+                  code=td[0].strip()
+                  if not re.fullmatch(r'\d{4}',code): continue
+                  out['tpex'].append({
+                    'code':code,'name':td[1],'market':'上櫃','close':num(td[2]),
+                    'change':num(td[3]),'open':num(td[4]),'high':num(td[5]),'low':num(td[6]),
+                    'volume':num(td[8]),'value':num(td[9])
+                  })
+          except Exception as e: out['errors'].append('TPEx: '+repr(e))
+
+          with open('market.json','w',encoding='utf-8') as f:
+              json.dump(out,f,ensure_ascii=False,separators=(',',':'))
+          print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'errors',out['errors'])
+          PY
+      - name: Commit data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update market data"
+          git push
