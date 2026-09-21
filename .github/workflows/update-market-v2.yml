@@ -1,112 +1,249 @@
 name: Update Taiwan Market Data V2
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '10,40 1-5 * * 1-5'
+
 permissions:
   contents: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
+
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V2 analysis
+
+      - name: Build V2.1 analysis
         run: |
           cat > /tmp/v2.py <<'PY'
-          import requests,json,re,datetime,time,statistics
+          import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.0'}
-          TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
+
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.1'}
+          TZ=datetime.timezone(datetime.timedelta(hours=8))
+          now=datetime.datetime.now(TZ)
+
           def num(v):
-            try:return float(str(v).replace(',','').replace('+','').strip())
-            except:return None
-          def sma(a,n): return sum(a[-n:])/n if len(a)>=n else None
-          # Current universe: reuse market.json when available, otherwise fetch current snapshots.
-          try: market=json.load(open('market.json',encoding='utf8'))
-          except: market={'twse':[],'tpex':[]}
-          universe=[x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('close') and x.get('value') and re.fullmatch(r'\d{4}',str(x.get('code','')))]
-          # Prefilter liquid/positive candidates; historical calls only for this shortlist.
-          for x in universe:
-            x['_pct']=(x.get('change') or 0)/(x['close']-(x.get('change') or 0))*100 if x['close']!=(x.get('change') or 0) else 0
-            x['_pre']=min(12,max(-5,x['_pct']))*5 + min(30,(x.get('value') or 0)/1e8)
-          cand=sorted([x for x in universe if x['close']>=5 and x['value']>=3e7 and x['_pct']>-1],key=lambda x:x['_pre'],reverse=True)[:70]
-          def twse_hist(code):
-            u='https://www.twse.com.tw/exchangeReport/STOCK_DAY'; p={'response':'json','date':now.strftime('%Y%m%d'),'stockNo':code}
-            j=requests.get(u,params=p,headers=H,timeout=25).json(); rows=[]
-            for z in j.get('data',[]):
-              if len(z)>=9: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
-            return [z for z in rows if z['close']]
-          def tpex_hist(code):
-            roc=now.year-1911; d=f'{roc}/{now.month:02d}'
-            urls=[
-              'https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php',
-              'https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock'
-            ]
-            # legacy JSON endpoint first
-            r=requests.get(urls[0],params={'l':'zh-tw','d':d,'stkno':code},headers=H,timeout=25)
             try:
-              j=r.json(); data=j.get('aaData') or j.get('data') or []
-              rows=[]
-              for z in data:
-                if isinstance(z,list) and len(z)>=9: rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
-              if rows:return [z for z in rows if z['close']]
-            except: pass
-            # HTML fallback
-            s=BeautifulSoup(r.text,'lxml'); rows=[]
-            for tr in s.select('tr'):
-              z=[c.get_text(strip=True) for c in tr.select('td')]
-              if len(z)>=9 and num(z[6]): rows.append({'close':num(z[6]),'high':num(z[4]),'low':num(z[5]),'volume':num(z[1])})
+              return float(str(v).replace(',','').replace('+','').strip())
+            except:
+              return None
+
+          def sma(a,n):
+            return sum(a[-n:])/n if len(a)>=n else None
+
+          try:
+            market=json.load(open('market.json',encoding='utf8'))
+          except:
+            market={'twse':[],'tpex':[]}
+
+          universe=[
+            x for x in market.get('twse',[])+market.get('tpex',[])
+            if x.get('close') and x.get('value')
+            and re.fullmatch(r'\d{4}',str(x.get('code','')))
+          ]
+
+          for x in universe:
+            ch=x.get('change') or 0
+            prev=x['close']-ch
+            x['_pct']=ch/prev*100 if prev else 0
+            x['_pre']=min(12,max(-5,x['_pct']))*5 + min(30,(x.get('value') or 0)/1e8)
+
+          cand=sorted(
+            [x for x in universe if x['close']>=5 and x['value']>=3e7 and x['_pct']>-1],
+            key=lambda x:x['_pre'],reverse=True
+          )[:70]
+
+          def months2():
+            cur=now.replace(day=1)
+            prev=(cur-datetime.timedelta(days=1)).replace(day=1)
+            return [prev,cur]
+
+          def twse_hist(code):
+            rows=[]
+            u='https://www.twse.com.tw/exchangeReport/STOCK_DAY'
+            for m in months2():
+              p={'response':'json','date':m.strftime('%Y%m%d'),'stockNo':code}
+              j=requests.get(u,params=p,headers=H,timeout=25).json()
+              for z in j.get('data',[]):
+                if len(z)>=9 and num(z[6]) is not None:
+                  rows.append({
+                    'close':num(z[6]),'high':num(z[4]),
+                    'low':num(z[5]),'volume':num(z[1])
+                  })
+              time.sleep(.04)
             return rows
-          picks=[]; ready=0
-          for i,x in enumerate(cand):
-            try: hist=twse_hist(x['code']) if x['market']=='上市' else tpex_hist(x['code'])
-            except: hist=[]
-            # ensure current session is represented
-            if not hist or abs(hist[-1]['close']-x['close'])>1e-9: hist.append({'close':x['close'],'high':x.get('high') or x['close'],'low':x.get('low') or x['close'],'volume':x.get('volume') or 0})
-            c=[z['close'] for z in hist if z.get('close')]; v=[z.get('volume') or 0 for z in hist if z.get('close')]
-            ma5=sma(c,5); ma20=sma(c,20); vr=(v[-1]/(sum(v[-6:-1])/5)) if len(v)>=6 and sum(v[-6:-1]) else None
-            h20=max(c[-20:]) if len(c)>=20 else max(c); l20=min(c[-20:]) if len(c)>=20 else min(c); pos=(x['close']-l20)/(h20-l20)*100 if h20>l20 else 50
-            strength=40; reasons=[]
-            if ma5 and x['close']>ma5: strength+=12; reasons.append('站上5MA')
-            if ma20 and x['close']>ma20: strength+=15; reasons.append('站上20MA')
-            if ma5 and ma20 and ma5>ma20: strength+=12; reasons.append('短均線多頭')
-            if vr and vr>=1.5: strength+=12; reasons.append(f'量比{vr:.1f}×')
-            if len(c)>=20 and x['close']>=max(c[-20:-1])*0.995: strength+=12; reasons.append('接近/突破20日高')
-            if x['_pct']>2: strength+=7; reasons.append('當日動能偏強')
+
+          def tpex_hist(code):
+            rows=[]
+            u='https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php'
+            for m in months2():
+              d=f'{m.year-1911}/{m.month:02d}'
+              r=requests.get(
+                u,params={'l':'zh-tw','d':d,'stkno':code},
+                headers=H,timeout=25
+              )
+              try:
+                j=r.json()
+                data=j.get('aaData') or j.get('data') or []
+                for z in data:
+                  if isinstance(z,list) and len(z)>=9 and num(z[6]) is not None:
+                    rows.append({
+                      'close':num(z[6]),'high':num(z[4]),
+                      'low':num(z[5]),'volume':num(z[1])
+                    })
+              except:
+                s=BeautifulSoup(r.text,'lxml')
+                for tr in s.select('tr'):
+                  z=[q.get_text(strip=True) for q in tr.select('td')]
+                  if len(z)>=9 and num(z[6]) is not None:
+                    rows.append({
+                      'close':num(z[6]),'high':num(z[4]),
+                      'low':num(z[5]),'volume':num(z[1])
+                    })
+              time.sleep(.04)
+            return rows
+
+          picks=[]
+          ready=0
+
+          for x in cand:
+            try:
+              hist=twse_hist(x['code']) if x['market']=='上市' else tpex_hist(x['code'])
+            except:
+              hist=[]
+
+            if not hist or abs(hist[-1]['close']-x['close'])>1e-9:
+              hist.append({
+                'close':x['close'],
+                'high':x.get('high') or x['close'],
+                'low':x.get('low') or x['close'],
+                'volume':x.get('volume') or 0
+              })
+
+            c=[z['close'] for z in hist if z.get('close')]
+            v=[z.get('volume') or 0 for z in hist if z.get('close')]
+
+            ma5=sma(c,5)
+            ma20=sma(c,20)
+            vr=(v[-1]/(sum(v[-6:-1])/5)) if len(v)>=6 and sum(v[-6:-1]) else None
+
+            h20=max(c[-20:]) if len(c)>=20 else max(c)
+            l20=min(c[-20:]) if len(c)>=20 else min(c)
+            pos=(x['close']-l20)/(h20-l20)*100 if h20>l20 else 50
+
+            strength=40
+            reasons=[]
+
+            if ma5 and x['close']>ma5:
+              strength+=12; reasons.append('站上5MA')
+            if ma20 and x['close']>ma20:
+              strength+=15; reasons.append('站上20MA')
+            if ma5 and ma20 and ma5>ma20:
+              strength+=12; reasons.append('短均線多頭')
+            if vr and vr>=1.5:
+              strength+=12; reasons.append(f'量比{vr:.1f}×')
+            if len(c)>=20 and x['close']>=max(c[-20:-1])*0.995:
+              strength+=12; reasons.append('接近/突破20日高')
+            if x['_pct']>2:
+              strength+=7; reasons.append('當日動能偏強')
+
             strength=max(0,min(100,round(strength)))
+
             entry=55
             bias=(x['close']/ma20-1)*100 if ma20 else None
-            if ma5 and x['close']>=ma5*0.99 and x['close']<=ma5*1.035: entry+=15; reasons.append('靠近5MA')
+
+            if ma5 and x['close']>=ma5*0.99 and x['close']<=ma5*1.035:
+              entry+=15; reasons.append('靠近5MA')
+
             if bias is not None:
-              if 0<=bias<=8: entry+=12
-              elif bias>15: entry-=25; reasons.append('乖離偏大')
-            if vr and 1.1<=vr<=3.5: entry+=8
-            if pos>98 and x['_pct']>6: entry-=18; reasons.append('突破後追價風險')
-            if x['_pct']>=9: entry-=15
+              if 0<=bias<=8:
+                entry+=12
+              elif bias>15:
+                entry-=25; reasons.append('乖離偏大')
+
+            if vr and 1.1<=vr<=3.5:
+              entry+=8
+
+            if pos>98 and x['_pct']>6:
+              entry-=18; reasons.append('突破後追價風險')
+
+            if x['_pct']>=9:
+              entry-=15
+
             entry=max(0,min(100,round(entry)))
-            if len(c)>=20: ready+=1
-            if strength>=72 and entry>=70: action='可觀察進場'
-            elif strength>=65: action='等拉回'
-            else: action='不追'
-            base=ma5 or x['close']; entry_low=min(x['close'],base)*0.99; entry_high=min(x['close']*1.01,base*1.02)
-            stop=(min(c[-10:]) if len(c)>=10 else (x.get('low') or x['close'])*0.97)
-            picks.append({**{k:x.get(k) for k in ('code','name','market','close')},'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'volume_ratio':vr,'pos20':pos,'entry_low':entry_low,'entry_high':entry_high,'stop':stop,'reasons':reasons[:5],'hist_days':len(c)})
+
+            if len(c)>=20:
+              ready+=1
+
+            if strength>=72 and entry>=70:
+              action='可觀察進場'
+            elif strength>=65:
+              action='等拉回'
+            else:
+              action='不追'
+
+            base=ma5 or x['close']
+            entry_low=min(x['close'],base)*0.99
+            entry_high=min(x['close']*1.01,base*1.02)
+            stop=min(c[-10:]) if len(c)>=10 else (x.get('low') or x['close'])*0.97
+
+            picks.append({
+              **{k:x.get(k) for k in ('code','name','market','close')},
+              'strength':strength,
+              'entry':entry,
+              'action':action,
+              'ma5':ma5,
+              'ma20':ma20,
+              'volume_ratio':vr,
+              'pos20':pos,
+              'entry_low':entry_low,
+              'entry_high':entry_high,
+              'stop':stop,
+              'reasons':reasons[:6],
+              'hist_days':len(c)
+            })
+
             time.sleep(.08)
-          picks=sorted(picks,key=lambda z:(z['strength']+z['entry'],z['strength']),reverse=True)[:5]
-          note='' if ready else '歷史行情尚未完整取得；V2 會以可取得資料評分。'
-          out={'updated_at':now.isoformat(),'universe':len(universe),'history_ready':ready,'picks':picks,'note':note}
-          json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+
+          picks=sorted(
+            picks,
+            key=lambda z:(z['strength']+z['entry'],z['strength']),
+            reverse=True
+          )[:5]
+
+          note='' if ready else '歷史行情尚未完整取得；V2.1 會以可取得資料評分。'
+
+          out={
+            'version':'2.1',
+            'updated_at':now.isoformat(),
+            'universe':len(universe),
+            'history_ready':ready,
+            'picks':picks,
+            'note':note
+          }
+
+          json.dump(
+            out,open('analysis.json','w',encoding='utf8'),
+            ensure_ascii=False,separators=(',',':')
+          )
           print(json.dumps(out,ensure_ascii=False,indent=2))
           PY
+
           python /tmp/v2.py
-      - name: Commit V2 data
+
+      - name: Commit V2.1 data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V2 analysis"
+          git commit -m "Update V2.1 analysis"
           git push
