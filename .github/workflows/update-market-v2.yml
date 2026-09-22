@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V3
+name: Update Taiwan Market Data V3.2
 on:
   workflow_dispatch:
   schedule:
@@ -15,13 +15,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests beautifulsoup4 lxml
-      - name: Build V3.1 full-market analysis
+      - name: Build V3.2 short-term capital radar
         run: |
           cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
           from collections import defaultdict
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.1'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.2'}
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
           S=requests.Session(); S.headers.update(H)
           def num(v):
@@ -31,6 +31,22 @@ jobs:
           try: market=json.load(open('market.json',encoding='utf8'))
           except: market={'twse':[],'tpex':[]}
           latest={str(x.get('code')):x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('code')}
+          # V3.2: 官方產業分類（先找資金在哪個族群）
+          sectors={}
+          def pick(r,keys):
+            for k in keys:
+              if k in r and str(r[k]).strip(): return str(r[k]).strip()
+            return ''
+          try:
+            for r in S.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L',timeout=30).json():
+              code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
+              if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sec
+          except Exception as e: print('TWSE sector',e)
+          try:
+            for r in S.get('https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O',timeout=30).json():
+              code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
+              if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sec
+          except Exception as e: print('TPEx sector',e)
           histories=defaultdict(list)
 
           def add(code,date,o,h,l,c,v,market_name):
@@ -125,37 +141,75 @@ jobs:
             lows=[z['low'] for z in hist[-10:] if z.get('low')]; stop=min(lows) if lows else min(c[-10:])
             plan=(low+high)/2; plan_stop=min(stop,plan*.96); risk=max(.01,plan-plan_stop)
             action='可觀察進場' if strength>=72 and entry>=72 and in_zone else ('等拉回' if strength>=65 and entry>=45 else '不追')
-            item={'code':code,'name':x.get('name') or code,'market':x.get('market') or hist[-1]['market'],'close':close,'pct':pct,'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':b5,'bias20':b20,'avgvol5':av5,'avgvol20':av20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,'in_zone':in_zone,'stop':stop,'plan_entry':plan,'plan_entry_low':low,'plan_entry_high':high,'plan_stop':plan_stop,'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'reasons':reasons[:6],'risks':risks[:6],'summary':'全市場歷史資料技術評分','hist_days':len(hist)}
+            item={'code':code,'name':x.get('name') or code,'market':x.get('market') or hist[-1]['market'],'sector':sectors.get(code,'其他/未分類'),'value':value,'close':close,'pct':pct,'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':b5,'bias20':b20,'avgvol5':av5,'avgvol20':av20,'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,'in_zone':in_zone,'stop':stop,'plan_entry':plan,'plan_entry_low':low,'plan_entry_high':high,'plan_stop':plan_stop,'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'reasons':reasons[:6],'risks':risks[:6],'summary':'全市場歷史資料技術評分','hist_days':len(hist)}
             results.append(item)
 
-          action_now=sorted([z for z in results if z['action']=='可觀察進場'],key=lambda z:(z['entry'],z['strength']),reverse=True)[:5]
-          tomorrow=[]
-          for z in results:
-            score=0; why=[]; tr=[]
-            if z['close']>z['ma5']: score+=18; why.append('收盤站上5MA')
-            if z['close']>z['ma20']: score+=18; why.append('收盤站上20MA')
-            if z['ma5']>z['ma20']: score+=14; why.append('短均線多頭')
-            vr=z['volume_ratio']
-            if vr and 1.1<=vr<=3: score+=15; why.append(f'量能健康 {vr:.1f}×')
-            elif vr and vr>4: score-=12; tr.append('爆量過熱')
-            if z['breakout20']: score+=12; why.append('突破20日高')
-            b=z['bias5']
-            if -1<=b<=4: score+=15; why.append('距5MA不遠')
-            elif b>8: score-=18; tr.append('5MA乖離偏大')
-            elif b>6: score-=10; tr.append('短線乖離偏高')
-            if 0<z['pct']<5: score+=8; why.append('當日動能適中')
-            elif z['pct']>=9: score-=25; tr.append('單日漲幅過大')
-            elif z['pct']>=6: score-=12; tr.append('短線漲幅偏大')
-            if z['pos20']>=98 and b>4: score-=10; tr.append('20日高檔追價風險')
-            score=max(0,min(100,round(score)))
-            if score>=60:
-              q=dict(z); q['tomorrow_score']=score;q['tomorrow_label']='優先觀察' if score>=75 else '觀察'
-              q['tomorrow_low']=z['ma5']*.995;q['tomorrow_high']=z['ma5']*1.03
-              q['breakout_price']=z['close']*1.002;q['no_chase_price']=z['close']*1.035
-              q['tomorrow_reasons']=why[:5];q['tomorrow_risks']=tr[:4]
-              q['tomorrow_plan']='A 拉回：進入觀察區且守住轉弱價再觀察。B 突破：站上突破價且量能延續再觀察。'
-              tomorrow.append(q)
-          tomorrow=sorted(tomorrow,key=lambda z:(z['tomorrow_score'],z['strength'],z['entry']),reverse=True)[:5]
+          # V3.2 第一層：族群資金熱度
+          groups=defaultdict(list)
+          for z in results: groups[z.get('sector','其他/未分類')].append(z)
+          hot_sectors=[]
+          for sec,arr in groups.items():
+            if len(arr)<3: continue
+            up=sum(1 for z in arr if z['pct']>0)/len(arr)*100
+            strong=sum(1 for z in arr if z['pct']>=3)/len(arr)*100
+            br=sum(1 for z in arr if z['breakout20'])/len(arr)*100
+            vol=sum(1 for z in arr if (z['volume_ratio'] or 0)>=1.3)/len(arr)*100
+            avg=sum(z['pct'] for z in arr)/len(arr)
+            val=sum(z.get('value',0) for z in arr)
+            heat=max(0,min(100,round(max(0,min(24,avg*6))+up*.20+strong*.18+br*.16+vol*.12+min(20,val/1e9*4))))
+            hot_sectors.append({'sector':sec,'heat':heat,'avg_pct':round(avg,2),'up_ratio':round(up,1),'strong_ratio':round(strong,1),'breakout_ratio':round(br,1),'volume_ratio':round(vol,1),'value':round(val),'count':len(arr)})
+          hot_sectors=sorted(hot_sectors,key=lambda z:(z['heat'],z['value']),reverse=True)[:5]
+          hotmap={z['sector']:z['heat'] for z in hot_sectors}
+
+          # 第二層：熱門族群內找短線領頭股。強勢與進場位置分開，不因過熱就把強股當弱股。
+          leaders=[]
+          for z0 in results:
+            if z0.get('sector') not in hotmap: continue
+            z=dict(z0); vr=z['volume_ratio'] or 0; p=z['pct']; b=z['bias5']
+            # 資金/動能分：族群30、量能20、當日動能15、突破15、趨勢10、短線收強10
+            volscore=100 if vr>=2.5 else 80 if vr>=1.8 else 65 if vr>=1.3 else 40 if vr>=1 else 15
+            pscore=100 if 4<=p<9 else 85 if 2<=p<4 else 70 if 9<=p<=10.5 else 45 if 0<p<2 else 10
+            brscore=100 if z['breakout20'] else 70 if z['close']>z['ma5']>z['ma20'] else 25
+            trendscore=100 if z['close']>z['ma5']>z['ma20'] else 60 if z['close']>z['ma20'] else 20
+            posscore=max(0,min(100,z['pos20']))
+            momentum=round(max(0,min(100,hotmap[z['sector']]*.30+volscore*.20+pscore*.15+brscore*.15+trendscore*.10+posscore*.10)))
+            entry=55; rr=[]
+            if -.5<=b<=3.5: entry+=25
+            elif b<=6: entry+=10
+            elif b>10: entry-=30; rr.append('距5MA過遠')
+            elif b>7: entry-=18; rr.append('5MA乖離偏大')
+            if 1.2<=vr<=3.2: entry+=12
+            elif vr>5: entry-=15; rr.append('爆量過熱')
+            if 1<=p<=5.5: entry+=10
+            elif p>=9: entry-=25; rr.append('接近漲停/急拉不追')
+            elif p>=6.5: entry-=12; rr.append('當日漲幅偏大')
+            if z['close']>z['ma5']>z['ma20']: entry+=8
+            entry=round(max(0,min(100,entry)))
+            low=z['ma5']*.995; high=z['ma5']*1.035; plan=(low+high)/2
+            ps=max(z['plan_stop'],plan*.955)
+            if ps>=plan: ps=plan*.955
+            risk=max(.01,plan-ps)
+            z.update({'strength':momentum,'momentum_score':momentum,'entry':entry,'sector_heat':hotmap[z['sector']],
+              'action':'可觀察進場' if momentum>=72 and entry>=72 and low<=z['close']<=high else ('強勢等拉回' if momentum>=72 else '觀察'),
+              'plan_entry_low':low,'plan_entry_high':high,'entry_low':low,'entry_high':high,'plan_entry':plan,'plan_stop':ps,
+              'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'tomorrow_low':low,'tomorrow_high':high,
+              'breakout_price':z['close']*1.002,'no_chase_price':max(high,z['close']*1.025),
+              'risks':(z.get('risks',[])+rr)[:6],'summary':f"{z['sector']}｜族群熱度 {hotmap[z['sector']]}｜短線資金動能"})
+            leaders.append(z)
+          leaders=sorted(leaders,key=lambda z:(z['momentum_score'],z['entry'],z.get('value',0)),reverse=True)
+          action_now=[]; sc=defaultdict(int)
+          for z in leaders:
+            if z['momentum_score']<68 or sc[z['sector']]>=2: continue
+            action_now.append(z); sc[z['sector']]+=1
+            if len(action_now)>=5: break
+          tomorrow=[]; sc=defaultdict(int)
+          for z in leaders:
+            score=round(z['momentum_score']*.7+z['entry']*.3)
+            if score<68 or sc[z['sector']]>=2: continue
+            q=dict(z); q['tomorrow_score']=score; q['tomorrow_label']='短線優先' if score>=80 else '短線觀察'
+            q['tomorrow_reasons']=(q.get('reasons',[])+[f"族群熱度 {q['sector_heat']}"])[:6]; q['tomorrow_risks']=q.get('risks',[])[:5]
+            tomorrow.append(q); sc[z['sector']]+=1
+            if len(tomorrow)>=5: break
           fixed=[]
           # 00685L 含英文字母，另外使用 TWSE STOCK_DAY 抓兩個月歷史，套用與一般標的一致的技術模型。
           def fixed_etf_history(code):
@@ -211,9 +265,9 @@ jobs:
             if x:
               x=dict(x); x['signal']=max(0,min(100,round(x['strength']*.45+x['entry']*.55)-(0 if x['in_zone'] else 8)-min(15,len(x['risks'])*5)))
               x['signal_label']='偏強' if x['signal']>=75 else ('中性' if x['signal']>=55 else '偏弱'); fixed.append(x)
-          out={'version':'3.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'note':'V3.1 全市場歷史掃描'}
+          out={'version':'3.2','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action_now,'tomorrow_watch':tomorrow,'hot_sectors':hot_sectors,'note':'V3.2 短線資金雷達：資金流→熱門族群→領頭股→進場位置'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps({'version':'3.1','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
+          print(json.dumps({'version':'3.2','universe':len(latest),'history_ready':len(results),'scanned':len(histories),'action':[x['code'] for x in action_now],'tomorrow':[x['code'] for x in tomorrow]},ensure_ascii=False,indent=2))
           PY
           python /tmp/v3.py
       - name: Commit V3.1 data
@@ -222,5 +276,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add analysis.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.1 full-market analysis"
+          git commit -m "Update V3.2 short-term capital radar"
           git push
