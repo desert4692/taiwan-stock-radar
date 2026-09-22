@@ -1,4 +1,4 @@
-name: V3.3.2 Intraday Auto Tracker
+name: V3.3 Intraday Auto Tracker
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
-          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.3.2'})
+          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.3'})
           def num(v):
               try:
                   s=str(v).replace(',','').replace('+','').strip()
@@ -84,7 +84,7 @@ jobs:
               for x in (base.get('tomorrow_watch') or [])[:5]:
                   q=dict(x);q['locked_at']=now.isoformat();q['locked_from']='前一交易日收盤分析'
                   locked.append(q)
-              state={'version':'3.3.2','trade_date':today,'locked_at':now.isoformat(),'locked_watch':locked}
+              state={'version':'3.3','trade_date':today,'locked_at':now.isoformat(),'locked_watch':locked}
 
           def live(x):
               z=dict(x);q=latest.get(str(z.get('code')),{})
@@ -108,38 +108,12 @@ jobs:
 
           locked=[live(x) for x in state.get('locked_watch',[])]
           locked_codes={str(x.get('code')) for x in locked}
-          # V3.3.2: current-market opportunity scan. This does not replace locked stocks.
-          # Uses fresh price/value/volume plus sector/baseline data already calculated by the heavy analysis.
-          pool={}
-          for x in (base.get('action_now') or [])+(base.get('tomorrow_watch') or []):
-              pool[str(x.get('code'))]=x
-          hotmap={x.get('sector'):x.get('heat',0) for x in (base.get('hot_sectors') or [])}
-          # Baseline lookup from known cards; fresh market scan also admits large-money movers even if not in yesterday's Top 5.
           opp=[]
-          for code,q in latest.items():
-              if code in locked_codes or not re.fullmatch(r'\\d{4}',code):continue
-              c=num(q.get('close')); ch=num(q.get('change')) or 0; val=num(q.get('value')) or 0; vol=num(q.get('volume')) or 0
-              if not c or c<5 or val<100000000:continue
-              prev=c-ch
-              pct=ch/prev*100 if prev else 0
-              if pct<2.0:continue
-              b=pool.get(code,{})
-              sector=b.get('sector','盤中資金流')
-              heat=hotmap.get(sector,b.get('sector_heat',0) or 0)
-              # Current-day money-flow score: liquidity 35, price momentum 30, sector heat 20, breakout/baseline 15.
-              money=min(100,val/1000000000*20)
-              pscore=100 if 3<=pct<8 else 80 if 2<=pct<3 else 65 if 8<=pct<=9.8 else 35
-              base_strength=b.get('momentum_score') or b.get('strength') or 50
-              score=round(money*.35+pscore*.30+min(100,heat)*.20+min(100,base_strength)*.15)
-              if score<60:continue
-              z=dict(b)
-              z.update({'code':code,'name':q.get('name') or b.get('name') or code,'market':q.get('market'),
-                        'sector':sector,'close':c,'pct':pct,'current_volume':vol,'current_value':val,
-                        'momentum_score':score,'sector_heat':heat,'intraday_score':score})
-              if not z.get('entry'): z['entry']=max(35,min(85,round(80-abs(pct-4)*6)))
-              z=live(z); z['live_status']='⚡ 盤中資金轉強｜'+z['live_status'].replace('🟢 ','').replace('🟡 ','').replace('🔴 ','')
-              opp.append(z)
-          opp=sorted(opp,key=lambda z:(z.get('intraday_score',0),z.get('current_value',0)),reverse=True)[:5]
+          for x in (base.get('action_now') or []):
+              if str(x.get('code')) in locked_codes:continue
+              z=live(x)
+              if (z.get('momentum_score') or z.get('strength') or 0)>=72 and (z.get('entry') or 0)>=65:opp.append(z)
+              if len(opp)>=5:break
           state['locked_watch']=locked;state['intraday_opportunities']=opp;state['updated_at']=now.isoformat()
           state['market_errors']=market['errors']
           with open('market.json','w',encoding='utf8') as f:json.dump(market,f,ensure_ascii=False,separators=(',',':'))
