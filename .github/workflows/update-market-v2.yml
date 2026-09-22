@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V3.2
+name: Update Taiwan Market Data V3.2.1
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: taiwan-stock-analysis-v32
+  group: taiwan-stock-analysis-v321
   cancel-in-progress: false
 
 jobs:
@@ -27,14 +27,14 @@ jobs:
 
       - run: pip install requests beautifulsoup4 lxml
 
-      - name: Build V3.2 short-term capital radar
+      - name: Build V3.2.1 Chinese-sector capital radar
         run: |
           cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
           from collections import defaultdict
 
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.2'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.2.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
           S=requests.Session(); S.headers.update(H)
@@ -48,6 +48,22 @@ jobs:
           except: market={'twse':[],'tpex':[]}
           latest={str(x.get('code')):x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('code')}
 
+          INDUSTRY={
+              '01':'水泥工業','02':'食品工業','03':'塑膠工業','04':'紡織纖維','05':'電機機械',
+              '06':'電器電纜','08':'玻璃陶瓷','09':'造紙工業','10':'鋼鐵工業','11':'橡膠工業',
+              '12':'汽車工業','14':'建材營造','15':'航運業','16':'觀光餐旅','17':'金融保險',
+              '18':'貿易百貨','20':'其他業','21':'化學工業','22':'生技醫療業','23':'油電燃氣業',
+              '24':'半導體業','25':'電腦及週邊設備業','26':'光電業','27':'通信網路業',
+              '28':'電子零組件業','29':'電子通路業','30':'資訊服務業','31':'其他電子業',
+              '32':'文化創意業','33':'農業科技業','34':'電子商務','35':'綠能環保',
+              '36':'數位雲端','37':'運動休閒','38':'居家生活'
+          }
+          def sector_name(raw):
+              v=str(raw or '').strip()
+              if not v:return ''
+              key=v.zfill(2) if v.isdigit() else v
+              return INDUSTRY.get(key,v)
+
           sectors={}
           def pick(r,keys):
               for k in keys:
@@ -57,13 +73,13 @@ jobs:
           try:
               for r in S.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L',timeout=30).json():
                   code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
-                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sec
+                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sector_name(sec)
           except Exception as e: print('TWSE sector',e)
 
           try:
               for r in S.get('https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O',timeout=30).json():
                   code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
-                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sec
+                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sector_name(sec)
           except Exception as e: print('TPEx sector',e)
 
           histories=defaultdict(list)
@@ -177,7 +193,7 @@ jobs:
           for z in results:groups[z['sector']].append(z)
           hot=[]
           for sec,arr in groups.items():
-              if len(arr)<3:continue
+              if sec=='其他/未分類' or len(arr)<3:continue
               up=sum(z['pct']>0 for z in arr)/len(arr)*100
               strong=sum(z['pct']>=3 for z in arr)/len(arr)*100
               br=sum(z['breakout20'] for z in arr)/len(arr)*100
@@ -311,18 +327,18 @@ jobs:
               x=build_etf(code)
               if x:fixed.append(x)
 
-          out={'version':'3.2','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),
+          out={'version':'3.2.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),
                'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action,
                'tomorrow_watch':tomorrow,'hot_sectors':hot,
-               'note':'V3.2 短線資金雷達：資金流→熱門族群→領頭股→進場位置'}
+               'note':'V3.2.1 中文族群版：資金流→熱門族群→領頭股→進場位置'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps({'version':'3.2','universe':len(histories),'history_ready':len(results),
+          print(json.dumps({'version':'3.2.1','universe':len(histories),'history_ready':len(results),
               'action':[x['code'] for x in action],'tomorrow':[x['code'] for x in tomorrow],
               'hot_sectors':[x['sector'] for x in hot]},ensure_ascii=False,indent=2))
           PY
           python /tmp/v3.py
 
-      - name: Commit V3.2 data safely
+      - name: Commit V3.2.1 data safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -338,7 +354,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update V3.2 short-term capital radar"
+          git commit -m "Update V3.2.1 Chinese-sector capital radar"
 
           for i in 1 2 3 4; do
             if git push origin HEAD:main; then
@@ -351,7 +367,7 @@ jobs:
             cp /tmp/analysis-v32.json analysis.json
             git add analysis.json
             if ! git diff --cached --quiet; then
-              git commit -m "Update V3.2 short-term capital radar"
+              git commit -m "Update V3.2.1 Chinese-sector capital radar"
             fi
             sleep $((i * 2))
           done
