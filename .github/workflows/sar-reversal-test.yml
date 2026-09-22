@@ -1,0 +1,450 @@
+name: SAR Reversal Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: taiwan-stock-sar-test
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install requests beautifulsoup4 lxml
+
+      - name: Scan full market SAR reversals
+        run: |
+          cat > /tmp/v3.py <<'PY'
+          import requests,json,re,datetime,time
+          from bs4 import BeautifulSoup
+          from collections import defaultdict
+
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.4.1'}
+          TZ=datetime.timezone(datetime.timedelta(hours=8))
+          now=datetime.datetime.now(TZ)
+          S=requests.Session(); S.headers.update(H)
+
+          def num(v):
+              try:return float(str(v).replace(',','').replace('+','').strip())
+              except:return None
+          def sma(a,n): return sum(a[-n:])/n if len(a)>=n else None
+
+          def psar(rows,step=.02,max_af=.20):
+              if len(rows)<3:return [],[]
+              sar=[None]*len(rows); trend=[0]*len(rows)
+              bull=rows[1]['close']>=rows[0]['close']
+              ep=max(rows[0]['high'],rows[1]['high']) if bull else min(rows[0]['low'],rows[1]['low'])
+              sar[1]=min(rows[0]['low'],rows[1]['low']) if bull else max(rows[0]['high'],rows[1]['high'])
+              trend[1]=1 if bull else -1; af=step
+              for i in range(2,len(rows)):
+                  cur=sar[i-1]+af*(ep-sar[i-1])
+                  if bull:
+                      cur=min(cur,rows[i-1]['low'],rows[i-2]['low'])
+                      if rows[i]['low']<cur:
+                          bull=False; cur=ep; ep=rows[i]['low']; af=step
+                      elif rows[i]['high']>ep:
+                          ep=rows[i]['high']; af=min(max_af,af+step)
+                  else:
+                      cur=max(cur,rows[i-1]['high'],rows[i-2]['high'])
+                      if rows[i]['high']>cur:
+                          bull=True; cur=ep; ep=rows[i]['high']; af=step
+                      elif rows[i]['low']<ep:
+                          ep=rows[i]['low']; af=min(max_af,af+step)
+                  sar[i]=cur; trend[i]=1 if bull else -1
+              return sar,trend
+
+          try: market=json.load(open('market.json',encoding='utf8'))
+          except: market={'twse':[],'tpex':[]}
+          latest={str(x.get('code')):x for x in market.get('twse',[])+market.get('tpex',[]) if x.get('code')}
+
+          INDUSTRY={
+              '01':'水泥工業','02':'食品工業','03':'塑膠工業','04':'紡織纖維','05':'電機機械',
+              '06':'電器電纜','08':'玻璃陶瓷','09':'造紙工業','10':'鋼鐵工業','11':'橡膠工業',
+              '12':'汽車工業','14':'建材營造','15':'航運業','16':'觀光餐旅','17':'金融保險',
+              '18':'貿易百貨','20':'其他業','21':'化學工業','22':'生技醫療業','23':'油電燃氣業',
+              '24':'半導體業','25':'電腦及週邊設備業','26':'光電業','27':'通信網路業',
+              '28':'電子零組件業','29':'電子通路業','30':'資訊服務業','31':'其他電子業',
+              '32':'文化創意業','33':'農業科技業','34':'電子商務','35':'綠能環保',
+              '36':'數位雲端','37':'運動休閒','38':'居家生活'
+          }
+          def sector_name(raw):
+              v=str(raw or '').strip()
+              if not v:return ''
+              key=v.zfill(2) if v.isdigit() else v
+              return INDUSTRY.get(key,v)
+
+          # V3.4：短線題材群組。命中題材時優先使用題材；未命中才回到證交所產業分類。
+          # 同一檔若同時屬於多個題材，依下列順序取第一個，避免重複計算資金熱度。
+          THEME_CODES={
+              '記憶體':{'2344','2408','3006','3260','5351','8299','6770'},
+              '封測／先進封裝':{'3711','2449','6239','6257','8150','6147','6510','3374'},
+              'PCB／載板':{'3037','8046','2367','2313','3044','4958','2383','6274','3189','5469','6213'},
+              'AI伺服器':{'2317','2382','3231','6669','3017','8210','2356','2376','2377','2379'},
+              '光通訊／矽光子':{'3081','3363','4979','3163','3450','4908','6442','4977'},
+              '機器人／自動化':{'2049','1590','4576','6691','4583','2464','8374'},
+              '散熱':{'3017','3324','3653','6230','2421'},
+              '電源／BBU':{'2308','6412','6781','3015','2457','6282'},
+              'IC設計':{'2454','3034','2379','3443','3661','6531','4966','3529','5274','4919'},
+              '晶圓代工':{'2330','2303','5347','6770'},
+              '半導體設備':{'3131','3583','6187','3413','6640','8027'},
+              '被動元件':{'2327','2492','3026','6173','2375'},
+              '低軌衛星／網通':{'2314','5388','6285','3596','4906','2419','6283'},
+              '重電／電網':{'1513','1519','1503','1609','1612','1514'},
+              '航運':{'2603','2609','2615','2618','2610','2637'},
+              '鋼鐵':{'2002','2014','2027','2031','2034','2069','2015'},
+              '生技':{'4743','6446','1795','6472','6547','4162','6589'},
+          }
+          THEME_ORDER=list(THEME_CODES.keys())
+
+          def market_group(code, official_sector):
+              for theme in THEME_ORDER:
+                  if code in THEME_CODES[theme]:
+                      return theme
+              return official_sector or '其他/未分類'
+
+          sectors={}
+          def pick(r,keys):
+              for k in keys:
+                  if k in r and str(r[k]).strip(): return str(r[k]).strip()
+              return ''
+
+          try:
+              for r in S.get('https://openapi.twse.com.tw/v1/opendata/t187ap03_L',timeout=30).json():
+                  code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
+                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sector_name(sec)
+          except Exception as e: print('TWSE sector',e)
+
+          try:
+              for r in S.get('https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O',timeout=30).json():
+                  code=pick(r,['公司代號']); sec=pick(r,['產業別','產業類別'])
+                  if re.fullmatch(r'\d{4}',code) and sec: sectors[code]=sector_name(sec)
+          except Exception as e: print('TPEx sector',e)
+
+          histories=defaultdict(list)
+          def add(code,date,o,h,l,c,v,market_name):
+              if not re.fullmatch(r'\d{4}',code) or c is None:return
+              histories[code].append({'date':date,'open':o,'high':h,'low':l,'close':c,'volume':v or 0,'market':market_name})
+
+          def twse_day(d):
+              j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
+                  params={'date':d.strftime('%Y%m%d'),'type':'ALLBUT0999','response':'json'},timeout=30).json()
+              for tb in j.get('tables',[]):
+                  fs=tb.get('fields') or []; data=tb.get('data') or []
+                  if '證券代號' not in fs or '收盤價' not in fs:continue
+                  idx={k:i for i,k in enumerate(fs)}
+                  for z in data:
+                      try:
+                          code=str(z[idx['證券代號']]).strip()
+                          add(code,d.isoformat(),num(z[idx.get('開盤價')]),num(z[idx.get('最高價')]),
+                              num(z[idx.get('最低價')]),num(z[idx['收盤價']]),num(z[idx.get('成交股數')]),'上市')
+                      except:pass
+
+          def tpex_day(d):
+              roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
+              r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',
+                  params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
+              s=BeautifulSoup(r.text,'lxml')
+              for tr in s.select('tr'):
+                  z=[q.get_text(strip=True) for q in tr.select('td')]
+                  if len(z)>=10 and re.fullmatch(r'\d{4}',z[0].strip()):
+                      add(z[0].strip(),d.isoformat(),num(z[4]),num(z[5]),num(z[6]),num(z[2]),num(z[8]),'上櫃')
+
+          d=now.date()-datetime.timedelta(days=55)
+          while d<=now.date():
+              if d.weekday()<5:
+                  try:twse_day(d)
+                  except Exception as e:print('TWSE',d,e)
+                  try:tpex_day(d)
+                  except Exception as e:print('TPEx',d,e)
+                  time.sleep(.08)
+              d+=datetime.timedelta(days=1)
+
+          results=[]
+          for code,hist in histories.items():
+              hist=sorted({z['date']:z for z in hist}.values(),key=lambda z:z['date'])
+              if len(hist)<20:continue
+              x=latest.get(code,{})
+              close=num(x.get('close')) or hist[-1]['close']
+              if close<5:continue
+              value=num(x.get('value')) or 0
+              if value<3e7:continue
+              ch=num(x.get('change')) or 0; prev=close-ch
+              pct=ch/prev*100 if prev else 0
+              c=[z['close'] for z in hist]; v=[z['volume'] for z in hist]
+              ma5=sma(c,5); ma20=sma(c,20)
+              av5=sum(v[-6:-1])/5 if len(v)>=6 else None
+              av20=sum(v[-21:-1])/20 if len(v)>=21 else None
+              current_vol=num(x.get('volume')) or v[-1]
+              vr=current_vol/av5 if av5 else None
+              h20=max(c[-20:]); l20=min(c[-20:])
+              pos=(close-l20)/(h20-l20)*100 if h20>l20 else 50
+              b5=(close/ma5-1)*100; b20=(close/ma20-1)*100
+              prev20=max(c[-21:-1]) if len(c)>=21 else None
+              breakout=bool(prev20 and close>=prev20)
+
+              strength=40; reasons=[]; risks=[]
+              if close>ma5:strength+=12; reasons.append('站上5MA')
+              if close>ma20:strength+=15; reasons.append('站上20MA')
+              if ma5>ma20:strength+=12; reasons.append('短均線多頭')
+              if vr and vr>=1.5:strength+=12; reasons.append(f'量比{vr:.1f}×')
+              if breakout:strength+=12; reasons.append('突破20日高')
+              if pct>2:strength+=7; reasons.append('當日動能偏強')
+              strength=max(0,min(100,round(strength)))
+
+              entry=55
+              if -1<=b5<=3.5:entry+=18; reasons.append('貼近5MA')
+              elif b5<=6:entry+=8
+              elif b5>10:entry-=22; risks.append('距5MA過遠')
+              elif b5>7:entry-=12; risks.append('5MA乖離偏大')
+              if 0<=b20<=8:entry+=12
+              elif b20>15:entry-=22; risks.append('20MA乖離過大')
+              elif b20>10:entry-=10; risks.append('20MA乖離偏大')
+              if vr and 1.1<=vr<=3:entry+=8
+              elif vr and vr>5:entry-=12; risks.append('爆量過熱')
+              elif vr and vr>3.5:entry-=6; risks.append('量能偏熱')
+              if pos>=98:entry-=10; risks.append('位於20日高檔')
+              if pct>=9:entry-=20; risks.append('單日漲幅過大')
+              elif pct>=6:entry-=10; risks.append('短線漲幅偏大')
+              if breakout and b5<=5 and pct<6:entry+=8
+              entry=max(0,min(100,round(entry)))
+
+              low=ma5*.99; high=ma5*1.025
+              lows=[z['low'] for z in hist[-10:] if z.get('low')]
+              support=min(lows) if lows else min(c[-10:])
+              plan=(low+high)/2; plan_stop=min(support,plan*.96)
+              risk=max(.01,plan-plan_stop)
+              action='可觀察進場' if strength>=72 and entry>=72 and low<=close<=high else ('等拉回' if strength>=65 and entry>=45 else '不追')
+
+              results.append({
+                  'code':code,'name':x.get('name') or code,'market':x.get('market') or hist[-1]['market'],
+                  'sector':market_group(code,sectors.get(code,'其他/未分類')),'official_sector':sectors.get(code,'其他/未分類'),'value':value,'close':close,'pct':pct,
+                  'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,
+                  'bias5':b5,'bias20':b20,'avgvol5':av5,'avgvol20':av20,'volume_ratio':vr,
+                  'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,
+                  'in_zone':low<=close<=high,'stop':support,'plan_entry':plan,'plan_entry_low':low,
+                  'plan_entry_high':high,'plan_stop':plan_stop,'take_profit1':plan+risk*1.5,
+                  'take_profit2':plan+risk*2.5,'reasons':reasons[:6],'risks':risks[:6],
+                  'summary':'全市場歷史資料技術評分','hist_days':len(hist)
+              })
+
+          groups=defaultdict(list)
+          for z in results:groups[z['sector']].append(z)
+          hot=[]
+          for sec,arr in groups.items():
+              if sec=='其他/未分類' or len(arr)<3:continue
+              up=sum(z['pct']>0 for z in arr)/len(arr)*100
+              strong=sum(z['pct']>=3 for z in arr)/len(arr)*100
+              br=sum(z['breakout20'] for z in arr)/len(arr)*100
+              vol=sum((z['volume_ratio'] or 0)>=1.3 for z in arr)/len(arr)*100
+              avg=sum(z['pct'] for z in arr)/len(arr)
+              val=sum(z['value'] for z in arr)
+              heat=round(max(0,min(100,max(0,min(24,avg*6))+up*.20+strong*.18+br*.16+vol*.12+min(20,val/1e9*4))))
+              hot.append({'sector':sec,'heat':heat,'avg_pct':round(avg,2),'up_ratio':round(up,1),
+                          'strong_ratio':round(strong,1),'breakout_ratio':round(br,1),
+                          'volume_ratio':round(vol,1),'value':round(val),'count':len(arr)})
+          hot=sorted(hot,key=lambda z:(z['heat'],z['value']),reverse=True)[:5]
+          hotmap={z['sector']:z['heat'] for z in hot}
+
+          sar_candidates=[]
+          result_map={z['code']:z for z in results}
+          for code,base in result_map.items():
+              hist=sorted({z['date']:z for z in histories[code]}.values(),key=lambda z:z['date'])
+              hist=[z for z in hist if z.get('high') is not None and z.get('low') is not None and z.get('close') is not None]
+              if len(hist)<20:continue
+              sv,tr=psar(hist)
+              flip_age=None
+              if len(tr)>=2 and tr[-2]==-1 and tr[-1]==1:flip_age=0
+              elif len(tr)>=3 and tr[-3]==-1 and tr[-2]==1 and tr[-1]==1:flip_age=1
+              if flip_age is None:continue
+              vr=base.get('volume_ratio') or 0
+              pct=base.get('pct') or 0
+              b5=base.get('bias5') or 0
+              if vr<0.8 or pct>=9.5 or b5>8:continue
+              heat=hotmap.get(base.get('sector'),0)
+              flip_score=100 if flip_age==0 else 82
+              vol_score=100 if vr>=2.5 else 85 if vr>=1.8 else 70 if vr>=1.3 else 55
+              trend_score=100 if base['close']>base['ma5']>base['ma20'] else 75 if base['close']>base['ma5'] else 45
+              score=round(flip_score*.35+vol_score*.20+trend_score*.15+base.get('entry',0)*.20+heat*.10)
+              sar_candidates.append({
+                  'code':code,'name':base['name'],'market':base['market'],'sector':base['sector'],
+                  'close':base['close'],'pct':pct,'sar':sv[-1],
+                  'sar_label':'今日空翻多' if flip_age==0 else '昨日空翻多・今日確認',
+                  'sar_score':score,'volume_ratio':vr,'entry':base.get('entry',0),
+                  'sector_heat':heat,'value':base['value']
+              })
+          sar_top5=sorted(sar_candidates,key=lambda z:(z['sar_score'],z['value']),reverse=True)[:5]
+
+          leaders=[]
+          for base in results:
+              if base['sector'] not in hotmap:continue
+              z=dict(base); vr=z['volume_ratio'] or 0; p=z['pct']; b=z['bias5']
+              volscore=100 if vr>=2.5 else 80 if vr>=1.8 else 65 if vr>=1.3 else 40 if vr>=1 else 15
+              pscore=100 if 4<=p<9 else 85 if 2<=p<4 else 70 if 9<=p<=10.5 else 45 if 0<p<2 else 10
+              brscore=100 if z['breakout20'] else 70 if z['close']>z['ma5']>z['ma20'] else 25
+              trend=100 if z['close']>z['ma5']>z['ma20'] else 60 if z['close']>z['ma20'] else 20
+              posscore=max(0,min(100,z['pos20']))
+              momentum=round(max(0,min(100,hotmap[z['sector']]*.30+volscore*.20+pscore*.15+brscore*.15+trend*.10+posscore*.10)))
+              entry=55; rr=[]
+              if -.5<=b<=3.5:entry+=25
+              elif b<=6:entry+=10
+              elif b>10:entry-=30; rr.append('距5MA過遠')
+              elif b>7:entry-=18; rr.append('5MA乖離偏大')
+              if 1.2<=vr<=3.2:entry+=12
+              elif vr>5:entry-=15; rr.append('爆量過熱')
+              if 1<=p<=5.5:entry+=10
+              elif p>=9:entry-=25; rr.append('接近漲停/急拉不追')
+              elif p>=6.5:entry-=12; rr.append('當日漲幅偏大')
+              if z['close']>z['ma5']>z['ma20']:entry+=8
+              entry=round(max(0,min(100,entry)))
+              low=z['ma5']*.995; high=z['ma5']*1.035; plan=(low+high)/2
+              ps=max(z['plan_stop'],plan*.955)
+              if ps>=plan:ps=plan*.955
+              risk=max(.01,plan-ps)
+              prior5=[q['high'] or q['close'] for q in histories[z['code']][-6:-1]]
+              breakout_price=max(prior5) if prior5 else z['close']*1.002
+              z.update({'strength':momentum,'momentum_score':momentum,'entry':entry,'sector_heat':hotmap[z['sector']],
+                  'action':'可觀察進場' if momentum>=72 and entry>=72 and low<=z['close']<=high else ('強勢等拉回' if momentum>=72 else '觀察'),
+                  'plan_entry_low':low,'plan_entry_high':high,'entry_low':low,'entry_high':high,'plan_entry':plan,
+                  'plan_stop':ps,'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,
+                  'tomorrow_low':low,'tomorrow_high':high,'breakout_price':breakout_price,
+                  'no_chase_price':max(high,z['close']*1.025),'risks':(z['risks']+rr)[:6],
+                  'summary':f"{z['sector']}｜族群熱度 {hotmap[z['sector']]}｜短線資金動能"})
+              leaders.append(z)
+
+          leaders=sorted(leaders,key=lambda z:(z['momentum_score'],z['entry'],z['value']),reverse=True)
+          action=[]; counts=defaultdict(int)
+          for z in leaders:
+              if z['momentum_score']<68 or counts[z['sector']]>=2:continue
+              action.append(z); counts[z['sector']]+=1
+              if len(action)>=5:break
+
+          tomorrow=[]; counts=defaultdict(int)
+          for z in leaders:
+              score=round(z['momentum_score']*.7+z['entry']*.3)
+              if score<68 or counts[z['sector']]>=2:continue
+              q=dict(z); q['tomorrow_score']=score
+              q['tomorrow_label']='短線優先' if score>=80 else '短線觀察'
+              q['tomorrow_reasons']=(q['reasons']+[f"族群熱度 {q['sector_heat']}"])[:6]
+              q['tomorrow_risks']=q['risks'][:5]
+              tomorrow.append(q); counts[z['sector']]+=1
+              if len(tomorrow)>=5:break
+
+          # V3.4.1：選股邏輯不變，只將明日觀察名單依明日分數重新排序。
+          tomorrow=sorted(
+              tomorrow,
+              key=lambda z:(z.get('tomorrow_score',0),z.get('momentum_score',0),z.get('entry',0),z.get('value',0)),
+              reverse=True
+          )
+
+          fixed=[]
+          def fixed_hist(code):
+              rows=[]; cur=now.replace(day=1); prev=(cur-datetime.timedelta(days=1)).replace(day=1)
+              for m in [prev,cur]:
+                  try:
+                      j=S.get('https://www.twse.com.tw/exchangeReport/STOCK_DAY',
+                          params={'response':'json','date':m.strftime('%Y%m%d'),'stockNo':code},timeout=30).json()
+                      for z in j.get('data',[]):
+                          if len(z)>=9 and num(z[6]) is not None:
+                              rows.append({'date':str(z[0]),'open':num(z[3]),'high':num(z[4]),'low':num(z[5]),'close':num(z[6]),'volume':num(z[1]) or 0})
+                  except Exception as e:print('ETF history',code,e)
+              return rows
+
+          def build_etf(code):
+              q=latest.get(code); hist=fixed_hist(code)
+              if not q or not num(q.get('close')) or len(hist)<20:return None
+              close=num(q['close']); ch=num(q.get('change')) or 0; prev=close-ch; pct=ch/prev*100 if prev else 0
+              if abs(hist[-1]['close']-close)>1e-9:
+                  hist.append({'date':now.strftime('%Y/%m/%d'),'open':num(q.get('open')) or close,'high':num(q.get('high')) or close,
+                               'low':num(q.get('low')) or close,'close':close,'volume':num(q.get('volume')) or 0})
+              c=[z['close'] for z in hist]; v=[z['volume'] for z in hist]
+              ma5=sma(c,5); ma20=sma(c,20); av5=sum(v[-6:-1])/5 if len(v)>=6 else None
+              vr=v[-1]/av5 if av5 else None; h20=max(c[-20:]); l20=min(c[-20:])
+              pos=(close-l20)/(h20-l20)*100 if h20>l20 else 50
+              b5=(close/ma5-1)*100; b20=(close/ma20-1)*100
+              prev20=max(c[-21:-1]) if len(c)>=21 else None; breakout=bool(prev20 and close>=prev20)
+              strength=40; reasons=[]; risks=[]
+              if close>ma5:strength+=12; reasons.append('站上5MA')
+              if close>ma20:strength+=15; reasons.append('站上20MA')
+              if ma5>ma20:strength+=12; reasons.append('短均線多頭')
+              if vr and vr>=1.5:strength+=12; reasons.append(f'量比{vr:.1f}×')
+              if breakout:strength+=12; reasons.append('突破20日高')
+              if pct>2:strength+=7
+              strength=max(0,min(100,round(strength)))
+              entry=55
+              if -1<=b5<=3.5:entry+=18
+              elif b5<=6:entry+=8
+              elif b5>10:entry-=22; risks.append('距5MA過遠')
+              elif b5>7:entry-=12; risks.append('5MA乖離偏大')
+              if 0<=b20<=8:entry+=12
+              elif b20>15:entry-=22
+              elif b20>10:entry-=10
+              if vr and 1.1<=vr<=3:entry+=8
+              elif vr and vr>5:entry-=12
+              if code=='00685L':risks.append('槓桿ETF波動較高')
+              entry=max(0,min(100,round(entry)))
+              low=ma5*.99; high=ma5*1.025; plan=(low+high)/2
+              lows=[z['low'] for z in hist[-10:] if z.get('low')]
+              stop=min(lows) if lows else min(c[-10:])
+              ps=min(stop,plan*.96); risk=max(.01,plan-ps)
+              action='可觀察進場' if strength>=72 and entry>=(78 if code=='00685L' else 72) and low<=close<=high else ('等拉回' if strength>=65 and entry>=45 else '不追')
+              out={'code':code,'name':q.get('name') or code,'market':q.get('market') or '上市','close':close,'pct':pct,
+                   'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':b5,'bias20':b20,
+                   'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,'in_zone':low<=close<=high,
+                   'stop':stop,'plan_entry':plan,'plan_entry_low':low,'plan_entry_high':high,'plan_stop':ps,
+                   'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'breakout_price':max([z.get('high') or z.get('close') for z in hist[-6:-1]]) if len(hist)>=6 else close*1.002,'no_chase_price':max(high,close*1.025),'reasons':reasons[:6],'risks':risks[:6],
+                   'summary':'固定ETF完整歷史技術分析','hist_days':len(hist)}
+              out['signal']=max(0,min(100,round(strength*.45+entry*.55)-(0 if out['in_zone'] else 8)-min(15,len(risks)*5)))
+              out['signal_label']='偏強' if out['signal']>=75 else ('中性' if out['signal']>=55 else '偏弱')
+              return out
+
+          for code in ['0050','00685L']:
+              x=build_etf(code)
+              if x:fixed.append(x)
+
+          out={'version':'3.4.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),
+               'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action,
+               'tomorrow_watch':tomorrow,'hot_sectors':hot,'hot_themes':hot,
+               'note':'V3.4.1 題材資金版：資金流→熱門題材→題材領頭股→進場位置'}
+          json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          sar_out={'version':'SAR-test-1','updated_at':now.isoformat(),'settings':{'step':0.02,'max_af':0.20,'flip_days':2,'min_value':30000000,'min_volume_ratio':0.8},'candidate_count':len(sar_candidates),'top5':sar_top5}
+          json.dump(sar_out,open('sar-test.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          print(json.dumps(sar_out,ensure_ascii=False,indent=2))
+          print(json.dumps({'version':'3.4.1','universe':len(histories),'history_ready':len(results),
+              'action':[x['code'] for x in action],'tomorrow':[x['code'] for x in tomorrow],
+              'hot_sectors':[x['sector'] for x in hot]},ensure_ascii=False,indent=2))
+          PY
+          python /tmp/v3.py
+
+      - name: Commit SAR test result safely
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp sar-test.json /tmp/sar-test.json
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/sar-test.json sar-test.json
+          git add sar-test.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Update SAR reversal test"
+          for i in 1 2 3 4; do
+            if git push origin HEAD:main; then exit 0; fi
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/sar-test.json sar-test.json
+            git add sar-test.json
+            if ! git diff --cached --quiet; then git commit -m "Update SAR reversal test"; fi
+            sleep $((i * 2))
+          done
+          exit 1
