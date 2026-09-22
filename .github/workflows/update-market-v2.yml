@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V3.4 Theme Radar
+name: Update Taiwan Market Data V3.4.1 Theme Radar
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: taiwan-stock-analysis-v34
+  group: taiwan-stock-analysis-v341
   cancel-in-progress: false
 
 jobs:
@@ -27,14 +27,14 @@ jobs:
 
       - run: pip install requests beautifulsoup4 lxml
 
-      - name: Build V3.4 thematic capital radar
+      - name: Build V3.4.1 thematic capital radar
         run: |
           cat > /tmp/v3.py <<'PY'
           import requests,json,re,datetime,time
           from bs4 import BeautifulSoup
           from collections import defaultdict
 
-          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.4'}
+          H={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.4.1'}
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
           S=requests.Session(); S.headers.update(H)
@@ -291,6 +291,13 @@ jobs:
               tomorrow.append(q); counts[z['sector']]+=1
               if len(tomorrow)>=5:break
 
+          # V3.4.1：選股邏輯不變，只將明日觀察名單依明日分數重新排序。
+          tomorrow=sorted(
+              tomorrow,
+              key=lambda z:(z.get('tomorrow_score',0),z.get('momentum_score',0),z.get('entry',0),z.get('value',0)),
+              reverse=True
+          )
+
           fixed=[]
           def fixed_hist(code):
               rows=[]; cur=now.replace(day=1); prev=(cur-datetime.timedelta(days=1)).replace(day=1)
@@ -356,18 +363,18 @@ jobs:
               x=build_etf(code)
               if x:fixed.append(x)
 
-          out={'version':'3.4','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),
+          out={'version':'3.4.1','updated_at':now.isoformat(),'universe':len(histories),'history_ready':len(results),
                'full_market_scanned':len(histories),'fixed_etfs':fixed,'action_now':action,
                'tomorrow_watch':tomorrow,'hot_sectors':hot,'hot_themes':hot,
-               'note':'V3.4 題材資金版：資金流→熱門題材→題材領頭股→進場位置'}
+               'note':'V3.4.1 題材資金版：資金流→熱門題材→題材領頭股→進場位置'}
           json.dump(out,open('analysis.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
-          print(json.dumps({'version':'3.4','universe':len(histories),'history_ready':len(results),
+          print(json.dumps({'version':'3.4.1','universe':len(histories),'history_ready':len(results),
               'action':[x['code'] for x in action],'tomorrow':[x['code'] for x in tomorrow],
               'hot_sectors':[x['sector'] for x in hot]},ensure_ascii=False,indent=2))
           PY
           python /tmp/v3.py
 
-      - name: Commit V3.4 thematic radar safely
+      - name: Commit V3.4.1 thematic radar safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -383,7 +390,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update V3.4 thematic capital radar"
+          git commit -m "Update V3.4.1 thematic capital radar"
 
           for i in 1 2 3 4; do
             if git push origin HEAD:main; then
@@ -396,7 +403,7 @@ jobs:
             cp /tmp/analysis-v32.json analysis.json
             git add analysis.json
             if ! git diff --cached --quiet; then
-              git commit -m "Update V3.4 thematic capital radar"
+              git commit -m "Update V3.4.1 thematic capital radar"
             fi
             sleep $((i * 2))
           done
