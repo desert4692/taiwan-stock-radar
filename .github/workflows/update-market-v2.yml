@@ -317,7 +317,7 @@ jobs:
                    'strength':strength,'entry':entry,'action':action,'ma5':ma5,'ma20':ma20,'bias5':b5,'bias20':b20,
                    'volume_ratio':vr,'pos20':pos,'breakout20':breakout,'entry_low':low,'entry_high':high,'in_zone':low<=close<=high,
                    'stop':stop,'plan_entry':plan,'plan_entry_low':low,'plan_entry_high':high,'plan_stop':ps,
-                   'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'reasons':reasons[:6],'risks':risks[:6],
+                   'take_profit1':plan+risk*1.5,'take_profit2':plan+risk*2.5,'breakout_price':max([z.get('high') or z.get('close') for z in hist[-6:-1]]) if len(hist)>=6 else close*1.002,'no_chase_price':max(high,close*1.025),'reasons':reasons[:6],'risks':risks[:6],
                    'summary':'固定ETF完整歷史技術分析','hist_days':len(hist)}
               out['signal']=max(0,min(100,round(strength*.45+entry*.55)-(0 if out['in_zone'] else 8)-min(15,len(risks)*5)))
               out['signal_label']='偏強' if out['signal']>=75 else ('中性' if out['signal']>=55 else '偏弱')
