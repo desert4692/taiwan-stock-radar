@@ -1,0 +1,181 @@
+name: ETF Radar V4.2.2
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron 使用 UTC；以下對應台灣時間
+    # 09:00～13:30，每 30 分鐘
+    - cron: '0,30 1-4 * * 1-5'
+    - cron: '0,30 5 * * 1-5'
+    # 14:05 收盤後最後更新
+    - cron: '5 6 * * 1-5'
+permissions:
+  contents: write
+concurrency:
+  group: etf-radar-v422
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install requests
+      - name: Build V4
+        run: |
+          python - <<'PY'
+          import requests,json,datetime,time
+          TZ=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(TZ)
+          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar V4'})
+          def n(x):
+            try:return float(str(x).replace(',','').replace('+','').strip())
+            except:return None
+          def sma(a,k):return sum(a[-k:])/k if len(a)>=k else None
+          def ema(a,k):
+            q=2/(k+1);o=[a[0]]
+            for x in a[1:]:o.append(x*q+o[-1]*(1-q))
+            return o
+          def atr(r,k=14):
+            z=[]
+            for i,x in enumerate(r):
+              p=r[i-1]['c'] if i else x['c'];z.append(max(x['h']-x['l'],abs(x['h']-p),abs(x['l']-p)))
+            return sum(z[-k:])/k
+          def psar(r,step=.02,mx=.2):
+            bull=r[1]['c']>=r[0]['c'];ep=max(r[0]['h'],r[1]['h']) if bull else min(r[0]['l'],r[1]['l'])
+            s=min(r[0]['l'],r[1]['l']) if bull else max(r[0]['h'],r[1]['h']);af=step
+            for i in range(2,len(r)):
+              q=s+af*(ep-s)
+              if bull:
+                q=min(q,r[i-1]['l'],r[i-2]['l'])
+                if r[i]['l']<q:bull=False;q=ep;ep=r[i]['l'];af=step
+                elif r[i]['h']>ep:ep=r[i]['h'];af=min(mx,af+step)
+              else:
+                q=max(q,r[i-1]['h'],r[i-2]['h'])
+                if r[i]['h']>q:bull=True;q=ep;ep=r[i]['h'];af=step
+                elif r[i]['l']<ep:ep=r[i]['l'];af=min(mx,af+step)
+              s=q
+            return s,1 if bull else -1
+          def ind(r):
+            c=[x['c'] for x in r];m5=sma(c,5);m10=sma(c,10);m20=sma(c,20);m60=sma(c,60);m120=sma(c,120)
+            e12,e26=ema(c,12),ema(c,26);dif=e12[-1]-e26[-1];sig=ema([x-y for x,y in zip(e12,e26)],9)[-1]
+            sd=(sum((x-m20)**2 for x in c[-20:])/20)**.5;sar,st=psar(r)
+            return {'ma5':m5,'ma10':m10,'ma20':m20,'ma60':m60,'ma120':m120,'macd_hist':dif-sig,'atr':atr(r),
+                    'sar':sar,'sar_trend':st,'boll_upper':m20+2*sd,'boll_lower':m20-2*sd}
+          def months(k=10):
+            y,m=now.year,now.month;o=[]
+            for _ in range(k):
+              o.append((y,m));m-=1
+              if m==0:y-=1;m=12
+            return list(reversed(o))
+          def stock(code):
+            o={}
+            for y,m in months():
+              j=S.get('https://www.twse.com.tw/exchangeReport/STOCK_DAY',params={'response':'json','date':f'{y}{m:02d}01','stockNo':code},timeout=30).json()
+              for z in j.get('data',[]):
+                if len(z)>=9 and n(z[6]) is not None:o[z[0]]={'d':z[0],'o':n(z[3]),'h':n(z[4]),'l':n(z[5]),'c':n(z[6]),'v':n(z[1]) or 0}
+              time.sleep(.06)
+            return list(o.values())
+          def taiex():
+            o={}
+            for y,m in months():
+              j=S.get('https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST',params={'response':'json','date':f'{y}{m:02d}01'},timeout=30).json()
+              for z in j.get('data',[]):
+                if len(z)>=5 and n(z[4]) is not None:o[z[0]]={'d':z[0],'o':n(z[1]),'h':n(z[2]),'l':n(z[3]),'c':n(z[4]),'v':0}
+              time.sleep(.06)
+            return list(o.values())
+          def market(r):
+            x=ind(r);c=r[-1]['c'];s=50
+            s+=12 if c>x['ma20'] else -12;s+=15 if x['ma5']>x['ma10']>x['ma20'] else 0
+            s+=10 if x['ma20']>x['ma60'] else -8;s+=8 if x['macd_hist']>0 else -8;s+=8 if x['sar_trend']>0 else -8
+            s=max(0,min(100,round(s)));over=c>=x['boll_upper']-.25*x['atr']
+            return {'close':c,'trend_score':s,'state':'偏多' if s>=65 else ('偏弱' if s<=40 else '震盪'),'overheat':over,'indicators':x}
+          def zone(center,a,w):return [round(center-a*w,2),round(center+a*w,2)]
+          def plan0050(r,m):
+            x=ind(r);c=r[-1]['c'];a=x['atr'];z1=zone(x['ma20'],a,.35);z2=zone(x['ma60'],a,.45)
+            base=x['ma120'] if x['ma120'] else min(q['l'] for q in r[-120:]);z3=zone(base,a,.55);bias=(c/x['ma20']-1)*100
+            if z3[0]<=c<=z3[1] or c<z3[0]:act='積極加碼'
+            elif z2[0]<=c<=z2[1] or c<z2[0]:act='正常加碼'
+            elif z1[0]<=c<=z1[1] or c<z1[0]:act='小額加碼'
+            else:act='等待'
+            if m['trend_score']<45:act={'積極加碼':'正常加碼','正常加碼':'小額加碼','小額加碼':'小額加碼','等待':'等待'}[act]
+            if bias>5:act='等待'
+            return {'code':'0050','style':'中長線配置','close':c,'add_zone_1':z1,'add_zone_2':z2,'deep_add_zone':z3,'add_action':act,'market_state':m['state']}
+          def plan685(r,m):
+            x=ind(r);c=r[-1]['c'];a=x['atr'];rh=max(q['h'] for q in r[-20:-1]);rl=min(q['l'] for q in r[-20:])
+            ctr=(x['ma10']+x['ma20'])/2;lo=ctr-a*.45;hi=ctr+a*.25
+            br=rh+a*.08;nc=max(x['boll_upper'],x['ma5']+a*1.35);exitp=max(x['ma20']-a*.55,rl)
+            # V4.1：趨勢退出與中短線波段防守分離。
+            # 防守價取 10MA / SAR 中較高者，再保留少量 ATR 緩衝，避免正常震盪過早出場。
+            defense=max(x['ma10']-a*.30,x['sar']-a*.15)
+            defense=min(defense,c-a*.35)
+            if c>=br:
+              mode='突破模式';entry_base=br
+            else:
+              mode='拉回模式';entry_base=(lo+hi)/2
+            # 停利改由較近的波段防守價計算，不再用遠端趨勢退出價放大 R。
+            risk=max(a*.45,entry_base-defense)
+            r1=entry_base+risk*1.35
+            r2=entry_base+risk*2.20
+            r1=max(r1,entry_base+a*.60)
+            r2=max(r2,r1+a*.65)
+            if c<=exitp:act='退出／等待重新轉強'
+            elif c>nc:act='不追／持有者續抱至減碼區'
+            elif c>=br:act='突破確認'
+            elif lo<=c<=hi and m['trend_score']>=55:act='拉回進場區'
+            else:act='續抱／等待進場點'
+            return {'code':'00685L','style':'中短線波段','close':c,'mode':mode,'action':act,
+                    'pullback_zone':[round(lo,2),round(hi,2)],'breakout':round(br,2),'no_chase':round(nc,2),
+                    'effective_entry_base':round(entry_base,2),'swing_defense':round(defense,2),
+                    'reduce_1':round(r1,2),'reduce_2':round(r2,2),'exit':round(exitp,2),'market_state':m['state']}
+          ix=taiex();a=stock('0050');b=stock('00685L')
+          # V4.2：盤中現價改讀現有 market.json；歷史日K仍用 STOCK_DAY 計算指標。
+          live={}
+          try:
+            mj=json.load(open('market.json',encoding='utf8'))
+            rows=(mj.get('twse') or [])+(mj.get('tpex') or [])
+            if not rows:
+              rows=mj.get('stocks') or mj.get('data') or mj.get('quotes') or []
+              if isinstance(rows,dict): rows=list(rows.values())
+            for q in rows:
+              code=str(q.get('code') or q.get('stock_id') or q.get('symbol') or '').strip()
+              if code in ('0050','00685L'):
+                px=n(q.get('close') if q.get('close') is not None else q.get('price'))
+                if px is not None: live[code]=px
+          except Exception as e:
+            print('market.json live quote fallback:',e)
+          def inject_live(r,code):
+            if code not in live:return r
+            r=[dict(x) for x in r]
+            px=live[code]
+            # 將最新盤中價注入最後一根K；高低價同步擴展，避免 ATR/SAR 資料結構失真。
+            r[-1]['c']=px
+            r[-1]['h']=max(r[-1]['h'],px)
+            r[-1]['l']=min(r[-1]['l'],px)
+            return r
+          a=inject_live(a,'0050');b=inject_live(b,'00685L')
+          if len(ix)<120 or len(a)<120 or len(b)<20:raise Exception(f'資料不足 TAIEX={len(ix)} 0050={len(a)} 00685L={len(b)}')
+          m=market(ix);out={'version':'ETF-V4.2.2','updated_at':now.isoformat(),'market':m,'0050':plan0050(a,m),'00685L':plan685(b,m),
+            'live_quotes':live,
+            'note':'V4.2.2：依 market.json 的 twse+tpex 結構讀取 0050/00685L 盤中價；歷史指標仍使用 STOCK_DAY。'}
+          json.dump(out,open('etf-radar-v422.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          print(json.dumps(out,ensure_ascii=False,indent=2))
+          PY
+      - name: Commit V4 result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp etf-radar-v422.json /tmp/result.json
+          git fetch origin main && git reset --hard origin/main
+          cp /tmp/result.json etf-radar-v422.json
+          git add etf-radar-v422.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update ETF radar V4"
+          for i in 1 2 3 4; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main && git reset --hard origin/main
+            cp /tmp/result.json etf-radar-v422.json;git add etf-radar-v422.json
+            git diff --cached --quiet || git commit -m "Update ETF radar V4"
+            sleep $((i*2))
+          done
+          exit 1
