@@ -1,0 +1,1 @@
+{"version":"3.7.1-test","updated_at":"2026-09-24T00:10:51.449959+08:00","mode":"PREOPEN_PROBE","source":"TWSE MIS getStockInfo","requested_symbols":0,"received_quotes":0,"errors":[],"top5":[],"history":[{"at":"2026-09-24T00:10:51.449959+08:00","count":0,"quotes":[]}],"warning":"測試版：盤前資料只用來提早觀察，09:00後仍須由V3.7實際成交條件確認，不能把試撮價直接視為可成交進場價。"}
