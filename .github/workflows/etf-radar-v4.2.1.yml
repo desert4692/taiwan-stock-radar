@@ -1,0 +1,59 @@
+name: ETF Radar V4.2.1
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0,30 1-4 * * 1-5'
+    - cron: '0,30 5 * * 1-5'
+    - cron: '5 6 * * 1-5'
+permissions:
+  contents: write
+concurrency:
+  group: etf-radar-v421
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install requests
+      - name: Patch V4.2 to V4.2.1 and run
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/etf-radar-v4.2.yml')
+          s=p.read_text(encoding='utf8')
+          a="""rows=mj.get('stocks') or mj.get('data') or mj.get('quotes') or []
+            if isinstance(rows,dict): rows=list(rows.values())"""
+          b="""rows=(mj.get('twse') or [])+(mj.get('tpex') or [])
+            if not rows:
+              rows=mj.get('stocks') or mj.get('data') or mj.get('quotes') or []
+              if isinstance(rows,dict): rows=list(rows.values())"""
+          s=s.replace(a,b).replace("'version':'ETF-V4.2'","'version':'ETF-V4.2.1'").replace("etf-radar-v42.json","etf-radar-v421.json")
+          start=s.index("          python - <<'PY'")+len("          python - <<'PY'\n")
+          end=s.index("\n          PY",start)
+          code=s[start:end]
+          # This extracts the original embedded Python after our textual patch.
+          exec(compile(code,'v421.py','exec'))
+          PY
+      - name: Commit V4.2.1 result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp etf-radar-v421.json /tmp/result.json
+          git fetch origin main && git reset --hard origin/main
+          cp /tmp/result.json etf-radar-v421.json
+          git add etf-radar-v421.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update ETF radar V4.2.1"
+          for i in 1 2 3 4; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main && git reset --hard origin/main
+            cp /tmp/result.json etf-radar-v421.json
+            git add etf-radar-v421.json
+            git diff --cached --quiet || git commit -m "Update ETF radar V4.2.1"
+            sleep $((i*2))
+          done
+          exit 1
