@@ -1,0 +1,125 @@
+name: ETF Entry Exit Radar Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install requests
+      - name: Calculate 0050 and 00685L
+        run: |
+          cat > /tmp/e.py <<'PY'
+          import requests,json,datetime,math,time
+          TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
+          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar ETF-Test/1.0'})
+          def n(x):
+            try:return float(str(x).replace(',','').replace('+','').strip())
+            except:return None
+          def sma(a,k):return sum(a[-k:])/k if len(a)>=k else None
+          def ema(a,k):
+            o=[a[0]]; q=2/(k+1)
+            for x in a[1:]:o.append(x*q+o[-1]*(1-q))
+            return o
+          def atr(r,k=14):
+            t=[]
+            for i,x in enumerate(r):
+              p=r[i-1]['c'] if i else x['c']; t.append(max(x['h']-x['l'],abs(x['h']-p),abs(x['l']-p)))
+            return sum(t[-k:])/k
+          def psar(r,step=.02,mx=.2):
+            bull=r[1]['c']>=r[0]['c']; ep=max(r[0]['h'],r[1]['h']) if bull else min(r[0]['l'],r[1]['l'])
+            s=min(r[0]['l'],r[1]['l']) if bull else max(r[0]['h'],r[1]['h']); af=step
+            for i in range(2,len(r)):
+              q=s+af*(ep-s)
+              if bull:
+                q=min(q,r[i-1]['l'],r[i-2]['l'])
+                if r[i]['l']<q:bull=False;q=ep;ep=r[i]['l'];af=step
+                elif r[i]['h']>ep:ep=r[i]['h'];af=min(mx,af+step)
+              else:
+                q=max(q,r[i-1]['h'],r[i-2]['h'])
+                if r[i]['h']>q:bull=True;q=ep;ep=r[i]['h'];af=step
+                elif r[i]['l']<ep:ep=r[i]['l'];af=min(mx,af+step)
+              s=q
+            return s,1 if bull else -1
+          def ind(r):
+            c=[x['c'] for x in r]; m5=sma(c,5);m10=sma(c,10);m20=sma(c,20);m60=sma(c,60)
+            e12=ema(c,12);e26=ema(c,26); dif=e12[-1]-e26[-1]
+            mac=ema([x-y for x,y in zip(e12,e26)],9); hist=dif-mac[-1]
+            sd=(sum((x-m20)**2 for x in c[-20:])/20)**.5
+            sar,st=psar(r)
+            return {'ma5':m5,'ma10':m10,'ma20':m20,'ma60':m60,'macd_hist':hist,'atr':atr(r),
+                    'sar':sar,'sar_trend':st,'boll_upper':m20+2*sd,'boll_lower':m20-2*sd}
+          def months(k=6):
+            y,m=now.year,now.month; z=[]
+            for _ in range(k):
+              z.append((y,m));m-=1
+              if m==0:y-=1;m=12
+            return list(reversed(z))
+          def stock(code):
+            out={}
+            for y,m in months():
+              j=S.get('https://www.twse.com.tw/exchangeReport/STOCK_DAY',params={'response':'json','date':f'{y}{m:02d}01','stockNo':code},timeout=30).json()
+              for z in j.get('data',[]):
+                if len(z)>=9 and n(z[6]) is not None:out[z[0]]={'d':z[0],'o':n(z[3]),'h':n(z[4]),'l':n(z[5]),'c':n(z[6]),'v':n(z[1]) or 0}
+              time.sleep(.1)
+            return list(out.values())
+          def taiex():
+            out={}
+            for y,m in months():
+              j=S.get('https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST',params={'response':'json','date':f'{y}{m:02d}01'},timeout=30).json()
+              for z in j.get('data',[]):
+                if len(z)>=5 and n(z[4]) is not None:out[z[0]]={'d':z[0],'o':n(z[1]),'h':n(z[2]),'l':n(z[3]),'c':n(z[4]),'v':0}
+              time.sleep(.1)
+            return list(out.values())
+          def market(r):
+            x=ind(r);c=r[-1]['c'];s=50
+            s+=12 if c>x['ma20'] else -12
+            s+=15 if x['ma5']>x['ma10']>x['ma20'] else (-15 if x['ma5']<x['ma10']<x['ma20'] else 0)
+            s+=10 if x['ma20']>x['ma60'] else -8
+            s+=8 if x['macd_hist']>0 else -8
+            s+=8 if x['sar_trend']>0 else -8
+            s=max(0,min(100,round(s)))
+            return {'close':c,'score':s,'state':'偏多' if s>=65 else ('偏弱' if s<=40 else '震盪'),'indicators':x}
+          def plan(code,r,mkt,lev=False):
+            x=ind(r);c=r[-1]['c'];a=x['atr'];b=(c/x['ma5']-1)*100;s=50+(mkt['score']-50)*(.45 if lev else .30)
+            s+=8 if c>x['ma5'] else 0;s+=7 if c>x['ma10'] else 0;s+=8 if c>x['ma20'] else 0
+            s+=8 if x['ma5']>x['ma10']>x['ma20'] else 0;s+=7 if x['sar_trend']>0 else 0;s+=5 if x['macd_hist']>0 else 0
+            s+=8 if -1<=b<=3 else (-15 if b>6 else 0);s=max(0,min(100,round(s)))
+            ctr=(x['ma5']+x['ma10'])/2; lo=max(x['ma20'],ctr-a*(.55 if lev else .35)); hi=ctr+a*(.25 if lev else .15)
+            if lo>hi:lo,hi=hi,lo
+            rh=max(q['h'] for q in r[-20:-1]); rl=min(q['l'] for q in r[-20:])
+            br=rh+a*(.08 if lev else .05); nc=max(x['boll_upper'],x['ma5']+a*(1.35 if lev else 1.05))
+            stop=min(x['ma20']-a*(.65 if lev else .45),rl); ref=(lo+hi)/2;risk=max(a*.5,ref-stop)
+            tp1=ref+risk*(1.35 if lev else 1.5);tp2=ref+risk*(2.2 if lev else 2.4)
+            status='🔴 轉弱／暫停進場' if c<=stop else ('🔴 過熱不追' if c>nc else ('🟢 拉回觀察進場' if lo<=c<=hi and mkt['score']>=55 else ('🟢 突破確認' if c>=br and mkt['score']>=60 else ('🟡 等待轉強' if c<lo else '🟡 等拉回／等突破'))))
+            return {'code':code,'close':c,'entry_score':s,'status':status,'pullback_low':lo,'pullback_high':hi,'breakout':br,'no_chase':nc,'take_profit1':tp1,'take_profit2':tp2,'stop':stop,'indicators':x}
+          ix=taiex();a=stock('0050');b=stock('00685L')
+          if min(len(ix),len(a),len(b))<60:raise Exception(f'資料不足 TAIEX={len(ix)} 0050={len(a)} 00685L={len(b)}')
+          m=market(ix);out={'version':'ETF-test-1','updated_at':now.isoformat(),'market':m,'etfs':[plan('0050',a,m),plan('00685L',b,m,True)]}
+          json.dump(out,open('etf-radar-test.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          print(json.dumps(out,ensure_ascii=False,indent=2))
+          PY
+          python /tmp/e.py
+      - name: Commit result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp etf-radar-test.json /tmp/result.json
+          git fetch origin main && git reset --hard origin/main
+          cp /tmp/result.json etf-radar-test.json
+          git add etf-radar-test.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update ETF radar test"
+          for i in 1 2 3 4; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main && git reset --hard origin/main
+            cp /tmp/result.json etf-radar-test.json; git add etf-radar-test.json
+            git diff --cached --quiet || git commit -m "Update ETF radar test"
+            sleep $((i*2))
+          done
+          exit 1
