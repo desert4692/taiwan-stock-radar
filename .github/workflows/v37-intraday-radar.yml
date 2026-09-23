@@ -1,0 +1,121 @@
+name: V3.7 Intraday Short-Term Radar
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
+    - cron: '0,5,10,15,20,25,30 5 * * 1-5'
+permissions:
+  contents: write
+concurrency:
+  group: taiwan-stock-v37
+  cancel-in-progress: true
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install requests beautifulsoup4 lxml
+      - name: Build intraday radar
+        run: |
+          cat > /tmp/v37.py <<'PY'
+          import json,re,datetime,requests
+          from bs4 import BeautifulSoup
+          TZ=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(TZ)
+          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/3.7'})
+          def n(v):
+            try:return float(str(v).replace(',','').replace('+','').strip())
+            except:return None
+          market={'updated_at':now.isoformat(),'quote_date':now.strftime('%Y-%m-%d'),'twse':[],'tpex':[],'errors':[]}
+          try:
+            j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',params={'date':now.strftime('%Y%m%d'),'type':'ALL','response':'json'},timeout=40).json();d={}
+            for tb in j.get('tables') or []:
+              for r in tb.get('data') or []:
+                if not isinstance(r,list) or len(r)<11:continue
+                c=str(r[0]).strip()
+                if not re.fullmatch(r'\d{4}',c):continue
+                close=n(r[8])
+                if close is None:continue
+                ch=n(r[10]) or 0
+                if '-' in str(r[9]) or 'green' in str(r[9]).lower():ch=-abs(ch)
+                d[c]={'code':c,'name':str(r[1]).strip(),'market':'上市','volume':n(r[2]),'value':n(r[4]),'open':n(r[5]),'high':n(r[6]),'low':n(r[7]),'close':close,'change':ch}
+            market['twse']=list(d.values())
+          except Exception as e:market['errors'].append('TWSE '+repr(e))
+          try:
+            r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm',timeout=30)
+            t=BeautifulSoup(r.text,'lxml').find('table')
+            if t:
+              for tr in t.find_all('tr'):
+                z=[x.get_text(' ',strip=True) for x in tr.find_all('td')]
+                if len(z)>=10 and re.fullmatch(r'\d{4}',z[0]):market['tpex'].append({'code':z[0],'name':z[1],'market':'上櫃','close':n(z[2]),'change':n(z[3]),'open':n(z[4]),'high':n(z[5]),'low':n(z[6]),'volume':n(z[8]),'value':n(z[9])})
+          except Exception as e:market['errors'].append('TPEx '+repr(e))
+          try:a=json.load(open('analysis.json',encoding='utf8'))
+          except:a={}
+          hist={}
+          for k in ('action_now','tomorrow_watch'):
+            for x in a.get(k,[]) or []:hist[str(x.get('code'))]=x
+          latest=market['twse']+market['tpex'];raw=[]
+          for q in latest:
+            c=n(q.get('close'));v=n(q.get('value')) or 0;ch=n(q.get('change')) or 0
+            if not c or c<5 or v<3e7:continue
+            prev=c-ch;pct=ch/prev*100 if prev else 0
+            if pct<=-4 or pct>=8.5:continue
+            o=n(q.get('open')) or c;hi=n(q.get('high')) or c;lo=n(q.get('low')) or c
+            pos=(c-lo)/(hi-lo) if hi>lo else .5
+            x=dict(hist.get(q['code'],{}));x.update(q);x.update({'pct':pct,'pos':pos})
+            raw.append(x)
+          ps=sorted(x['pct'] for x in raw)
+          rank=lambda v:100*sum(z<=v for z in ps)/len(ps) if ps else 50
+          out=[]
+          for x in raw:
+            c=n(x['close']);pct=x['pct'];pos=x['pos'];ma5=n(x.get('ma5'));vr=n(x.get('volume_ratio'))
+            mom=n(x.get('momentum_score') or x.get('strength')) or 50;ent=n(x.get('entry')) or 50;heat=n(x.get('sector_heat')) or 0
+            impulse=50+(10 if pct>=1 else 0)+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=(n(x.get('open')) or c) else 0)+(8 if pos>=.7 else 0)
+            score=impulse*.35+rank(pct)*.2+mom*.2+ent*.15+heat*.1
+            if vr is not None and 1.2<=vr<=3.5:score+=8
+            if pct>=6:score-=15
+            bias=(c/ma5-1)*100 if ma5 else 0
+            if bias>7:score-=20
+            elif bias>5:score-=10
+            score=round(max(0,min(100,score)))
+            if score<68 or pos<.45:continue
+            if ma5 and c<ma5*.985:continue
+            hi=n(x.get('high')) or c;lo=n(x.get('low')) or c;rng=max(c*.012,hi-lo)
+            pl=max(ma5*.995 if ma5 else c-rng*.4,c-rng*.55);ph=min(ma5*1.018 if ma5 else c+rng*.05,c*1.002)
+            if pl>ph:pl,ph=ph,pl
+            ref=(pl+ph)/2;stop=min(ref*.965,ref-rng*.65);risk=max(.01,ref-stop)
+            br=max(hi,c*1.003);nc=max(br*1.018,c+rng*.75);bs=min(br*.972,br-rng*.55);rr=max(.01,br-bs)
+            status='🟢 拉回進場區' if pl<=c<=ph else ('🟢 突破進場區' if br<=c<=nc else ('🔴 超過不追價' if c>nc else '🟡 等待進場條件'))
+            out.append({'code':x['code'],'name':x['name'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,
+              'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'回到進場區且止穩，量能不可明顯失速',
+              'breakout_entry':round(br,2),'breakout_condition':'突破盤中高點後站穩，量能維持','no_chase':round(nc,2),
+              'stop':round(stop,2),'stop_condition':'跌破停損價或支撐後無法快速站回','take_profit1':round(ref+risk*1.5,2),'take_profit2':round(ref+risk*2.5,2),
+              'breakout_stop':round(bs,2),'breakout_tp1':round(br+rr*1.5,2),'breakout_tp2':round(br+rr*2.5,2)})
+          out=sorted(out,key=lambda x:(x['score'],x['pct']),reverse=True)[:5]
+          result={'version':'3.7','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'scanned':len(latest),'opportunities':out,'market_errors':market['errors'],'note':'最多5檔，條件不足可為0檔。'}
+          json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          json.dump(market,open('market.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
+          print(json.dumps(result,ensure_ascii=False,indent=2))
+          PY
+          python /tmp/v37.py
+      - name: Commit safely
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp v37-intraday.json /tmp/v37.json; cp market.json /tmp/market.json
+          git fetch origin main; git reset --hard origin/main
+          cp /tmp/v37.json v37-intraday.json; cp /tmp/market.json market.json
+          git add v37-intraday.json market.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update V3.7 intraday radar"
+          for i in 1 2 3 4; do
+            git push origin HEAD:main && exit 0
+            git fetch origin main;git reset --hard origin/main
+            cp /tmp/v37.json v37-intraday.json;cp /tmp/market.json market.json
+            git add v37-intraday.json market.json
+            git diff --cached --quiet || git commit -m "Update V3.7 intraday radar"
+            sleep $((i*2))
+          done
+          exit 1
