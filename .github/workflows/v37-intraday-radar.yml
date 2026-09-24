@@ -1,11 +1,11 @@
-name: V3.7.3 Intraday MIS Radar
+name: V3.8 Intraday Entry Confirmation Radar
 on:
   workflow_dispatch:
   schedule:
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
     - cron: '0,5,10,15,20,25,30 5 * * 1-5'
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v373, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v38, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -15,12 +15,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: pip install requests beautifulsoup4 lxml
-      - name: Scan whole market through MIS
+      - name: V3.8 scan and entry confirmation
         run: |
-          cat > /tmp/v373.py <<'PY'
+          cat > /tmp/v38.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
-          TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
+          TZ=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(TZ)
           S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 Chrome/153 Safari/537.36','Referer':'https://mis.twse.com.tw/stock/index.jsp'})
           def n(v):
             try:
@@ -28,7 +28,7 @@ jobs:
               return None if s in ('','-','--','---','None') else float(s)
             except:return None
           errors=[];meta={}
-          # Build independent universe. TPEx failures no longer block MIS because repo data is also used as fallback.
+          # Universe: same proven architecture as V3.7.3
           for back in range(10):
             if any(x['market']=='上市' for x in meta.values()):break
             d=now.date()-datetime.timedelta(days=back)
@@ -54,9 +54,9 @@ jobs:
                   if len(z)>=2 and re.fullmatch(r'\d{4}',z[0]):meta[z[0]]={'name':z[1],'market':'上櫃'}
             except Exception as e:errors.append('TPEx universe '+repr(e))
           try:
-            old=json.load(open('market.json',encoding='utf8'))
+            oldm=json.load(open('market.json',encoding='utf8'))
             for market,key in [('上市','twse'),('上櫃','tpex')]:
-              for x in old.get(key,[]) or []:
+              for x in oldm.get(key,[]) or []:
                 c=str(x.get('code',''))
                 if re.fullmatch(r'\d{4}',c):meta.setdefault(c,{'name':x.get('name',c),'market':market})
           except:pass
@@ -76,60 +76,87 @@ jobs:
           hist={}
           for k in ('action_now','tomorrow_watch'):
             for x in a.get(k,[]) or []:hist[str(x.get('code'))]=x
-
-          # V3.7.3 FIX:
-          # Do NOT require MIS field d == today. Many valid live rows omit/stale that field.
-          # A stock participates only when MIS supplies an actual last-traded price z plus
-          # reference price y, and at least one live-trading footprint (time/open/high/low/volume).
-          q=[];today=now.strftime('%Y%m%d')
+          # Previous V3.8 snapshot is used to confirm "stop falling / hold breakout".
+          try:
+            old=json.load(open('v37-intraday.json',encoding='utf8'))
+            prev={str(x.get('code')):x for x in old.get('opportunities',[]) or [] if str(old.get('version','')).startswith(('3.7','3.8'))}
+          except:prev={}
+          q=[]
           for z in rows:
             c=str(z.get('c') or '');px=n(z.get('z'));ref=n(z.get('y'))
             if not re.fullmatch(r'\d{4}',c) or px is None or not ref or ref<=0:continue
-            op=n(z.get('o'));hi=n(z.get('h'));lo=n(z.get('l'));vol=n(z.get('v'))
-            tm=str(z.get('t') or '').strip();dt=str(z.get('d') or '').strip()
-            footprint=bool(tm) or op is not None or hi is not None or lo is not None or (vol is not None and vol>0)
-            if not footprint:continue
-            # If MIS explicitly supplies a different date AND no current trading footprint, reject.
-            # Otherwise actual z is treated as the current last trade.
+            op=n(z.get('o'));hi=n(z.get('h'));lo=n(z.get('l'));vol=n(z.get('v'));tm=str(z.get('t') or '').strip()
+            if not (tm or op is not None or hi is not None or lo is not None or (vol or 0)>0):continue
             q.append({'code':c,'name':z.get('n') or meta.get(c,{}).get('name',c),'market':meta.get(c,{}).get('market'),
-              'close':px,'reference':ref,'open':op,'high':hi,'low':lo,'volume':vol,'pct':(px/ref-1)*100,
-              'raw_time':tm,'raw_date':dt})
+              'close':px,'reference':ref,'open':op,'high':hi,'low':lo,'volume':vol,'pct':(px/ref-1)*100,'raw_time':tm})
           ps=sorted(x['pct'] for x in q)
           def rank(v):return 100*sum(z<=v for z in ps)/len(ps) if ps else 50
           out=[]
           for x in q:
             c=x['close'];pct=x['pct'];hi=x['high'] or c;lo=x['low'] or c;op=x['open'] or c
-            if c<5 or pct<=-4 or pct>=8.5:continue
+            # V3.8 candidate gate
+            if c<5 or pct<1.5 or pct>8:continue
             pos=(c-lo)/(hi-lo) if hi>lo else .5
+            rs=rank(pct)
+            if pos<.60 or rs<80:continue
             h=hist.get(x['code'],{});ma5=n(h.get('ma5'));mom=n(h.get('momentum_score') or h.get('strength')) or 50
             ent=n(h.get('entry')) or 50;heat=n(h.get('sector_heat')) or 0
-            impulse=50+(10 if pct>=1 else 0)+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=op else 0)+(8 if pos>=.7 else 0)
-            score=impulse*.40+rank(pct)*.25+mom*.15+ent*.10+heat*.10
-            if pct>=6:score-=15
             bias=(c/ma5-1)*100 if ma5 else 0
-            if bias>7:score-=20
-            elif bias>5:score-=10
+            if bias>7:continue
+            impulse=50+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=op else 0)+(10 if pos>=.7 else 0)
+            score=impulse*.35+rs*.30+mom*.15+ent*.10+heat*.10
+            if pct>=6:score-=12
+            if bias>5:score-=10
             score=round(max(0,min(100,score)))
-            if score<68 or pos<.45 or (ma5 and c<ma5*.985):continue
+            if score<72:continue
             rng=max(c*.012,hi-lo)
-            pl=max(ma5*.995 if ma5 else c-rng*.4,c-rng*.55);ph=min(ma5*1.018 if ma5 else c+rng*.05,c*1.002)
-            if pl>ph:pl,ph=ph,pl
-            ref=(pl+ph)/2;stop=min(ref*.965,ref-rng*.65);risk=max(.01,ref-stop)
-            br=max(hi,c*1.003);nc=max(br*1.018,c+rng*.75);bs=min(br*.972,br-rng*.55);rr=max(.01,br-bs)
-            status='🟢 拉回進場區' if pl<=c<=ph else ('🟢 突破進場區' if br<=c<=nc else ('🔴 超過不追價' if c>nc else '🟡 等待進場條件'))
+            # Pullback: require 1-3% off intraday high. Merely touching zone is WAIT, not green.
+            dd=(hi-c)/hi*100 if hi else 0
+            pl=hi*.97;ph=hi*.99
+            support=max(lo,ma5*.995 if ma5 else lo)
+            pull_price_ok=1<=dd<=3 and c>=support
+            pv=prev.get(x['code'],{});pc=n(pv.get('close'))
+            pull_confirm=pull_price_ok and pc is not None and c>=pc*.999
+            # Breakout: current price must exceed prior observed intraday breakout level by ~0.3%
+            old_break=n(pv.get('breakout_entry'))
+            breakout_level=old_break if old_break else hi*1.003
+            break_confirm=old_break is not None and c>=old_break*1.003 and c>=op
+            # Plans and RR
+            pull_entry=c if pull_confirm else (pl+ph)/2
+            pull_stop=min(support*.995,pull_entry*.975)
+            prisk=max(.01,pull_entry-pull_stop)
+            pt1=pull_entry+prisk*1.5;pt2=pull_entry+prisk*2.5
+            br_entry=c if break_confirm else breakout_level
+            br_stop=max(support,br_entry*.975);brisk=max(.01,br_entry-br_stop)
+            bt1=br_entry+brisk*1.5;bt2=br_entry+brisk*2.5
+            no_chase=br_entry*1.018
+            pull_rr=(pt1-pull_entry)/prisk if prisk else 0
+            break_rr=(bt1-br_entry)/brisk if brisk else 0
+            green_pull=pull_confirm and pull_rr>=1.5
+            green_break=break_confirm and c<=no_chase and break_rr>=1.5
+            if green_pull:status='🟢 拉回止穩確認'
+            elif green_break:status='🟢 突破確認'
+            elif pull_price_ok:status='🟡 拉回區等待止穩'
+            elif dd<1:status='🟡 強勢但等拉回／突破'
+            else:status='🟡 等待進場條件'
             out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,
-              'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'回到進場區且止穩，量能不可明顯失速',
-              'breakout_entry':round(br,2),'breakout_condition':'突破盤中高點後站穩，量能維持','no_chase':round(nc,2),
-              'stop':round(stop,2),'stop_condition':'跌破停損價或支撐後無法快速站回','take_profit1':round(ref+risk*1.5,2),'take_profit2':round(ref+risk*2.5,2),
-              'breakout_stop':round(bs,2),'breakout_tp1':round(br+rr*1.5,2),'breakout_tp2':round(br+rr*2.5,2),'raw_time':x['raw_time']})
-          out=sorted(out,key=lambda x:(x['score'],x['pct']),reverse=True)[:5]
-          result={'version':'3.7.3','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
+              'relative_strength':round(rs),'intraday_position':round(pos*100,1),'drawdown_from_high':round(dd,2),'bias5':round(bias,2) if ma5 else None,
+              'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'自盤中高點回檔1～3%，守住支撐後下一次掃描不再走弱才確認',
+              'breakout_entry':round(breakout_level,2),'breakout_condition':'突破前次盤中高點約0.3%，下一次掃描仍站穩才確認',
+              'no_chase':round(no_chase,2),'stop':round(pull_stop,2),'stop_condition':'跌破支撐／停損價且無法快速站回',
+              'take_profit1':round(pt1,2),'take_profit2':round(pt2,2),'rr':round(pull_rr,2),
+              'breakout_stop':round(br_stop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':round(break_rr,2),
+              'entry_confirmed':bool(green_pull or green_break),'raw_time':x['raw_time']})
+          # Confirmed entries first; otherwise strongest waiting candidates.
+          out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
+          result={'version':'3.8','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
             'universe_size':len(meta),'received_quotes':len(rows),'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
-            'market_errors':errors[:15],'note':'V3.7.3：不再用MIS日期欄硬過濾；僅使用有實際成交價z與盤中足跡的報價。最多5檔。'}
+            'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':20,'score_min':72,'bias5_exclude_above':7,'pullback':'high -1~3% + next-scan stabilization','breakout':'prior level +0.3% + hold','rr_min':1.5},
+            'market_errors':errors[:15],'note':'V3.8：到達價格不等於進場；拉回需止穩確認，突破需跨掃描確認，RR至少1.5。最多5檔。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v373.py
+          python /tmp/v38.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
@@ -138,12 +165,12 @@ jobs:
           git fetch origin main;git reset --hard origin/main
           cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.7.3 intraday MIS radar"
+          git commit -m "Update V3.8 entry confirmation radar"
           for i in 1 2 3 4;do
             git push origin HEAD:main && exit 0
             git fetch origin main;git reset --hard origin/main
             cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
-            git diff --cached --quiet || git commit -m "Update V3.7.3 intraday MIS radar"
+            git diff --cached --quiet || git commit -m "Update V3.8 entry confirmation radar"
             sleep $((i*2))
           done
           exit 1
