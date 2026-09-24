@@ -1,11 +1,11 @@
-name: V3.8 Intraday Entry Confirmation Radar
+name: V3.8.1 Intraday Entry Confirmation Radar
 on:
   workflow_dispatch:
   schedule:
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
     - cron: '0,5,10,15,20,25,30 5 * * 1-5'
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v38, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v381, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -17,7 +17,7 @@ jobs:
       - run: pip install requests beautifulsoup4 lxml
       - name: V3.8 scan and entry confirmation
         run: |
-          cat > /tmp/v38.py <<'PY'
+          cat > /tmp/v381.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(TZ)
@@ -98,7 +98,7 @@ jobs:
             if c<5 or pct<1.5 or pct>8:continue
             pos=(c-lo)/(hi-lo) if hi>lo else .5
             rs=rank(pct)
-            if pos<.60 or rs<80:continue
+            if pos<.60 or rs<70:continue
             h=hist.get(x['code'],{});ma5=n(h.get('ma5'));mom=n(h.get('momentum_score') or h.get('strength')) or 50
             ent=n(h.get('entry')) or 50;heat=n(h.get('sector_heat')) or 0
             bias=(c/ma5-1)*100 if ma5 else 0
@@ -108,7 +108,7 @@ jobs:
             if pct>=6:score-=12
             if bias>5:score-=10
             score=round(max(0,min(100,score)))
-            if score<72:continue
+            if score<68:continue
             rng=max(c*.012,hi-lo)
             # Pullback: require 1-3% off intraday high. Merely touching zone is WAIT, not green.
             dd=(hi-c)/hi*100 if hi else 0
@@ -149,14 +149,14 @@ jobs:
               'entry_confirmed':bool(green_pull or green_break),'raw_time':x['raw_time']})
           # Confirmed entries first; otherwise strongest waiting candidates.
           out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.8','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
+          result={'version':'3.8.1','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
             'universe_size':len(meta),'received_quotes':len(rows),'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
-            'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':20,'score_min':72,'bias5_exclude_above':7,'pullback':'high -1~3% + next-scan stabilization','breakout':'prior level +0.3% + hold','rr_min':1.5},
-            'market_errors':errors[:15],'note':'V3.8：到達價格不等於進場；拉回需止穩確認，突破需跨掃描確認，RR至少1.5。最多5檔。'}
+            'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':30,'score_min':68,'bias5_exclude_above':7,'pullback':'high -1~3% + next-scan stabilization','breakout':'prior level +0.3% + hold','rr_min':1.5},
+            'market_errors':errors[:15],'note':'V3.8.1：RS放寬至前30%、最低分68；其餘進場確認、過熱控制與RR至少1.5維持不變。最多5檔。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v38.py
+          python /tmp/v381.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
@@ -165,12 +165,12 @@ jobs:
           git fetch origin main;git reset --hard origin/main
           cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.8 entry confirmation radar"
+          git commit -m "Update V3.8.1 entry confirmation radar"
           for i in 1 2 3 4;do
             git push origin HEAD:main && exit 0
             git fetch origin main;git reset --hard origin/main
             cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
-            git diff --cached --quiet || git commit -m "Update V3.8 entry confirmation radar"
+            git diff --cached --quiet || git commit -m "Update V3.8.1 entry confirmation radar"
             sleep $((i*2))
           done
           exit 1
