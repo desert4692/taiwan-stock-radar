@@ -1,0 +1,66 @@
+name: V3.9 Stable 5-Minute Intraday Scheduler
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Taiwan time 08:37, Monday-Friday.
+    # One long-running scheduler then dispatches V3.8.2 every 5 minutes.
+    - cron: '37 0 * * 1-5'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: taiwan-stock-v39-scheduler
+  cancel-in-progress: false
+
+jobs:
+  scheduler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - name: Stable intraday 5-minute scheduler
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+
+          echo "V3.9 scheduler started: $(TZ=Asia/Taipei date '+%F %T')"
+
+          while true; do
+            WD=$(TZ=Asia/Taipei date +%u)
+            HM=$(TZ=Asia/Taipei date +%H%M)
+
+            if [ "$WD" -gt 5 ]; then
+              echo "Weekend - exit."
+              exit 0
+            fi
+
+            if [ "$HM" -lt 0900 ]; then
+              sleep 20
+              continue
+            fi
+
+            if [ "$HM" -gt 1330 ]; then
+              echo "Market session finished - exit."
+              exit 0
+            fi
+
+            START=$(date +%s)
+            echo "Dispatch V3.8.2: $(TZ=Asia/Taipei date '+%F %T')"
+
+            # V3.8.2 remains the scanner. V3.9 only replaces the unreliable
+            # every-5-minute GitHub cron with one persistent session scheduler.
+            gh workflow run v37-intraday-radar.yml --repo "$REPO" --ref main || true
+
+            END=$(date +%s)
+            USED=$((END-START))
+            WAIT=$((300-USED))
+            if [ "$WAIT" -lt 20 ]; then WAIT=20; fi
+
+            echo "Next dispatch in ${WAIT}s."
+            sleep "$WAIT"
+          done
