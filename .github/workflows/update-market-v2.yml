@@ -3,8 +3,8 @@ name: Update Taiwan Market Data V3.4.1 Theme Radar
 on:
   workflow_dispatch:
   schedule:
-    - cron: '3,13,23,33,43,53 1-5 * * 1-5'
-    - cron: '3 6 * * 1-5'
+    # 台灣時間 14:05，週一～週五收盤後執行一次
+    - cron: '5 6 * * 1-5'
 
 permissions:
   contents: write
