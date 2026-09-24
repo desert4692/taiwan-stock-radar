@@ -1,9 +1,6 @@
 name: V3.8.2 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
-    - cron: '0,5,10,15,20,25,30 5 * * 1-5'
 permissions: {contents: write}
 concurrency: {group: taiwan-stock-v382, cancel-in-progress: true}
 jobs:
