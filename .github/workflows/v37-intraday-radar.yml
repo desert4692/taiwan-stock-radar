@@ -1,11 +1,11 @@
-name: V3.7.2 Intraday MIS Radar
+name: V3.7.3 Intraday MIS Radar
 on:
   workflow_dispatch:
   schedule:
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
     - cron: '0,5,10,15,20,25,30 5 * * 1-5'
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v372, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v373, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -17,32 +17,33 @@ jobs:
       - run: pip install requests beautifulsoup4 lxml
       - name: Scan whole market through MIS
         run: |
-          cat > /tmp/v372.py <<'PY'
+          cat > /tmp/v373.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
-          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 Chrome/153 Safari/537.36','Referer':'https://mis.twse.com.tw/stock/index.jsp'})
+          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 Chrome/153 Safari/537.36','Referer':'https://mis.twse.com.tw/stock/index.jsp'})
           def n(v):
             try:
               s=str(v).replace(',','').replace('+','').strip()
               return None if s in ('','-','--','---','None') else float(s)
             except:return None
-          errors=[]; meta={}
+          errors=[];meta={}
+          # Build independent universe. TPEx failures no longer block MIS because repo data is also used as fallback.
           for back in range(10):
-            if any(x['market']=='上市' for x in meta.values()): break
+            if any(x['market']=='上市' for x in meta.values()):break
             d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5: continue
+            if d.weekday()>=5:continue
             try:
               j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',params={'date':d.strftime('%Y%m%d'),'type':'ALL','response':'json'},timeout=35).json()
               for tb in j.get('tables') or []:
                 for r in tb.get('data') or []:
                   if isinstance(r,list) and len(r)>=2 and re.fullmatch(r'\d{4}',str(r[0]).strip()):
-                    c=str(r[0]).strip(); meta[c]={'name':str(r[1]).strip(),'market':'上市'}
-            except Exception as e: errors.append('TWSE universe '+repr(e))
+                    c=str(r[0]).strip();meta[c]={'name':str(r[1]).strip(),'market':'上市'}
+            except Exception as e:errors.append('TWSE universe '+repr(e))
           for back in range(10):
-            if any(x['market']=='上櫃' for x in meta.values()): break
+            if any(x['market']=='上櫃' for x in meta.values()):break
             d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5: continue
+            if d.weekday()>=5:continue
             try:
               roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
               r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
@@ -50,52 +51,71 @@ jobs:
               if t:
                 for tr in t.find_all('tr'):
                   z=[x.get_text(' ',strip=True) for x in tr.find_all('td')]
-                  if len(z)>=2 and re.fullmatch(r'\d{4}',z[0]): meta[z[0]]={'name':z[1],'market':'上櫃'}
-            except Exception as e: errors.append('TPEx universe '+repr(e))
+                  if len(z)>=2 and re.fullmatch(r'\d{4}',z[0]):meta[z[0]]={'name':z[1],'market':'上櫃'}
+            except Exception as e:errors.append('TPEx universe '+repr(e))
+          try:
+            old=json.load(open('market.json',encoding='utf8'))
+            for market,key in [('上市','twse'),('上櫃','tpex')]:
+              for x in old.get(key,[]) or []:
+                c=str(x.get('code',''))
+                if re.fullmatch(r'\d{4}',c):meta.setdefault(c,{'name':x.get('name',c),'market':market})
+          except:pass
           syms=[('tse' if m['market']=='上市' else 'otc')+'_'+c+'.tw' for c,m in meta.items()]
           rows=[]
           for i in range(0,len(syms),60):
             for attempt in range(3):
               try:
                 r=S.get('https://mis.twse.com.tw/stock/api/getStockInfo.jsp',params={'ex_ch':'|'.join(syms[i:i+60]),'json':'1','delay':'0','_':str(int(time.time()*1000))},timeout=25)
-                r.raise_for_status(); rows+=r.json().get('msgArray') or []; break
+                r.raise_for_status();rows+=r.json().get('msgArray') or [];break
               except Exception as e:
-                if attempt==2: errors.append('MIS '+repr(e))
+                if attempt==2:errors.append('MIS '+repr(e))
                 time.sleep(1.2*(attempt+1))
             time.sleep(.15)
           try:a=json.load(open('analysis.json',encoding='utf8'))
           except:a={}
           hist={}
           for k in ('action_now','tomorrow_watch'):
-            for x in a.get(k,[]) or []: hist[str(x.get('code'))]=x
-          today=now.strftime('%Y%m%d'); q=[]
+            for x in a.get(k,[]) or []:hist[str(x.get('code'))]=x
+
+          # V3.7.3 FIX:
+          # Do NOT require MIS field d == today. Many valid live rows omit/stale that field.
+          # A stock participates only when MIS supplies an actual last-traded price z plus
+          # reference price y, and at least one live-trading footprint (time/open/high/low/volume).
+          q=[];today=now.strftime('%Y%m%d')
           for z in rows:
-            c=str(z.get('c') or ''); px=n(z.get('z')); ref=n(z.get('y'))
-            if not re.fullmatch(r'\d{4}',c) or px is None or not ref or str(z.get('d') or '')!=today: continue
+            c=str(z.get('c') or '');px=n(z.get('z'));ref=n(z.get('y'))
+            if not re.fullmatch(r'\d{4}',c) or px is None or not ref or ref<=0:continue
+            op=n(z.get('o'));hi=n(z.get('h'));lo=n(z.get('l'));vol=n(z.get('v'))
+            tm=str(z.get('t') or '').strip();dt=str(z.get('d') or '').strip()
+            footprint=bool(tm) or op is not None or hi is not None or lo is not None or (vol is not None and vol>0)
+            if not footprint:continue
+            # If MIS explicitly supplies a different date AND no current trading footprint, reject.
+            # Otherwise actual z is treated as the current last trade.
             q.append({'code':c,'name':z.get('n') or meta.get(c,{}).get('name',c),'market':meta.get(c,{}).get('market'),
-              'close':px,'reference':ref,'open':n(z.get('o')),'high':n(z.get('h')),'low':n(z.get('l')),
-              'pct':(px/ref-1)*100,'raw_time':z.get('t')})
+              'close':px,'reference':ref,'open':op,'high':hi,'low':lo,'volume':vol,'pct':(px/ref-1)*100,
+              'raw_time':tm,'raw_date':dt})
           ps=sorted(x['pct'] for x in q)
-          def rank(v): return 100*sum(z<=v for z in ps)/len(ps) if ps else 50
+          def rank(v):return 100*sum(z<=v for z in ps)/len(ps) if ps else 50
           out=[]
           for x in q:
-            c=x['close']; pct=x['pct']; hi=x['high'] or c; lo=x['low'] or c; op=x['open'] or c
-            if c<5 or pct<=-4 or pct>=8.5: continue
+            c=x['close'];pct=x['pct'];hi=x['high'] or c;lo=x['low'] or c;op=x['open'] or c
+            if c<5 or pct<=-4 or pct>=8.5:continue
             pos=(c-lo)/(hi-lo) if hi>lo else .5
-            h=hist.get(x['code'],{}); ma5=n(h.get('ma5')); mom=n(h.get('momentum_score') or h.get('strength')) or 50; ent=n(h.get('entry')) or 50; heat=n(h.get('sector_heat')) or 0
+            h=hist.get(x['code'],{});ma5=n(h.get('ma5'));mom=n(h.get('momentum_score') or h.get('strength')) or 50
+            ent=n(h.get('entry')) or 50;heat=n(h.get('sector_heat')) or 0
             impulse=50+(10 if pct>=1 else 0)+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=op else 0)+(8 if pos>=.7 else 0)
             score=impulse*.40+rank(pct)*.25+mom*.15+ent*.10+heat*.10
-            if pct>=6: score-=15
+            if pct>=6:score-=15
             bias=(c/ma5-1)*100 if ma5 else 0
-            if bias>7: score-=20
-            elif bias>5: score-=10
+            if bias>7:score-=20
+            elif bias>5:score-=10
             score=round(max(0,min(100,score)))
-            if score<68 or pos<.45 or (ma5 and c<ma5*.985): continue
+            if score<68 or pos<.45 or (ma5 and c<ma5*.985):continue
             rng=max(c*.012,hi-lo)
-            pl=max(ma5*.995 if ma5 else c-rng*.4,c-rng*.55); ph=min(ma5*1.018 if ma5 else c+rng*.05,c*1.002)
-            if pl>ph: pl,ph=ph,pl
-            ref=(pl+ph)/2; stop=min(ref*.965,ref-rng*.65); risk=max(.01,ref-stop)
-            br=max(hi,c*1.003); nc=max(br*1.018,c+rng*.75); bs=min(br*.972,br-rng*.55); rr=max(.01,br-bs)
+            pl=max(ma5*.995 if ma5 else c-rng*.4,c-rng*.55);ph=min(ma5*1.018 if ma5 else c+rng*.05,c*1.002)
+            if pl>ph:pl,ph=ph,pl
+            ref=(pl+ph)/2;stop=min(ref*.965,ref-rng*.65);risk=max(.01,ref-stop)
+            br=max(hi,c*1.003);nc=max(br*1.018,c+rng*.75);bs=min(br*.972,br-rng*.55);rr=max(.01,br-bs)
             status='🟢 拉回進場區' if pl<=c<=ph else ('🟢 突破進場區' if br<=c<=nc else ('🔴 超過不追價' if c>nc else '🟡 等待進場條件'))
             out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,
               'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'回到進場區且止穩，量能不可明顯失速',
@@ -103,27 +123,27 @@ jobs:
               'stop':round(stop,2),'stop_condition':'跌破停損價或支撐後無法快速站回','take_profit1':round(ref+risk*1.5,2),'take_profit2':round(ref+risk*2.5,2),
               'breakout_stop':round(bs,2),'breakout_tp1':round(br+rr*1.5,2),'breakout_tp2':round(br+rr*2.5,2),'raw_time':x['raw_time']})
           out=sorted(out,key=lambda x:(x['score'],x['pct']),reverse=True)[:5]
-          result={'version':'3.7.2','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
-            'universe_size':len(meta),'received_quotes':len(rows),'valid_today_quotes':len(q),'scanned':len(q),'opportunities':out,
-            'market_errors':errors[:15],'note':'MIS全市場盤中掃描；最多5檔，條件不足可為0檔。'}
+          result={'version':'3.7.3','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
+            'universe_size':len(meta),'received_quotes':len(rows),'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
+            'market_errors':errors[:15],'note':'V3.7.3：不再用MIS日期欄硬過濾；僅使用有實際成交價z與盤中足跡的報價。最多5檔。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v372.py
+          python /tmp/v373.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp v37-intraday.json /tmp/v37.json
-          git fetch origin main; git reset --hard origin/main
-          cp /tmp/v37.json v37-intraday.json; git add v37-intraday.json
+          git fetch origin main;git reset --hard origin/main
+          cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.7.2 intraday MIS radar"
-          for i in 1 2 3 4; do
+          git commit -m "Update V3.7.3 intraday MIS radar"
+          for i in 1 2 3 4;do
             git push origin HEAD:main && exit 0
-            git fetch origin main; git reset --hard origin/main
-            cp /tmp/v37.json v37-intraday.json; git add v37-intraday.json
-            git diff --cached --quiet || git commit -m "Update V3.7.2 intraday MIS radar"
+            git fetch origin main;git reset --hard origin/main
+            cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
+            git diff --cached --quiet || git commit -m "Update V3.7.3 intraday MIS radar"
             sleep $((i*2))
           done
           exit 1
