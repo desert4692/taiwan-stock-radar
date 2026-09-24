@@ -2,9 +2,6 @@ name: V3.5 SAR Reversal Radar
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '20 6 * * 1-5'
-
 permissions:
   contents: write
 
