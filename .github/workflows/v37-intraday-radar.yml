@@ -1,11 +1,11 @@
-name: V3.8.1 Intraday Entry Confirmation Radar
+name: V3.8.2 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
   schedule:
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1-4 * * 1-5'
     - cron: '0,5,10,15,20,25,30 5 * * 1-5'
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v381, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v382, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -17,7 +17,7 @@ jobs:
       - run: pip install requests beautifulsoup4 lxml
       - name: V3.8 scan and entry confirmation
         run: |
-          cat > /tmp/v381.py <<'PY'
+          cat > /tmp/v382.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(TZ)
@@ -81,10 +81,41 @@ jobs:
             old=json.load(open('v37-intraday.json',encoding='utf8'))
             prev={str(x.get('code')):x for x in old.get('opportunities',[]) or [] if str(old.get('version','')).startswith(('3.7','3.8'))}
           except:prev={}
+          # V3.8.2: official current day-trading eligibility.
+          # TWSE/TPEX both publish official eligible-security datasets.
+          daytrade=set(); daytrade_errors=[]
+          def collect_codes(data):
+            out=set()
+            if isinstance(data,list):
+              for x in data: out |= collect_codes(x)
+            elif isinstance(data,dict):
+              # Prefer fields whose names indicate security/code.
+              for k,v in data.items():
+                ks=str(k).lower()
+                if any(w in ks for w in ('code','證券代號','股票代號','代號')):
+                  c=str(v).strip()
+                  if re.fullmatch(r'\d{4}',c): out.add(c)
+              if not out:
+                for v in data.values():
+                  if isinstance(v,(dict,list)): out |= collect_codes(v)
+            return out
+          try:
+            r=S.get('https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U',timeout=30);r.raise_for_status()
+            daytrade |= collect_codes(r.json())
+          except Exception as e: daytrade_errors.append('TWSE daytrade '+repr(e))
+          try:
+            r=S.get('https://www.tpex.org.tw/openapi/v1/tpex_securities',timeout=30);r.raise_for_status()
+            daytrade |= collect_codes(r.json())
+          except Exception as e: daytrade_errors.append('TPEx daytrade '+repr(e))
+          # Safety: never silently disable the filter if official feeds fail.
+          # A failed/implausibly small eligibility set produces no candidates rather than allowing ineligible stocks.
+          daytrade_feed_ok=len(daytrade)>=100
+          errors += daytrade_errors
           q=[]
           for z in rows:
             c=str(z.get('c') or '');px=n(z.get('z'));ref=n(z.get('y'))
             if not re.fullmatch(r'\d{4}',c) or px is None or not ref or ref<=0:continue
+            if not daytrade_feed_ok or c not in daytrade:continue
             op=n(z.get('o'));hi=n(z.get('h'));lo=n(z.get('l'));vol=n(z.get('v'));tm=str(z.get('t') or '').strip()
             if not (tm or op is not None or hi is not None or lo is not None or (vol or 0)>0):continue
             q.append({'code':c,'name':z.get('n') or meta.get(c,{}).get('name',c),'market':meta.get(c,{}).get('market'),
@@ -149,14 +180,14 @@ jobs:
               'entry_confirmed':bool(green_pull or green_break),'raw_time':x['raw_time']})
           # Confirmed entries first; otherwise strongest waiting candidates.
           out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.8.1','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
-            'universe_size':len(meta),'received_quotes':len(rows),'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
+          result={'version':'3.8.2','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
+            'universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(daytrade),'daytrade_feed_ok':daytrade_feed_ok,'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
             'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':30,'score_min':68,'bias5_exclude_above':7,'pullback':'high -1~3% + next-scan stabilization','breakout':'prior level +0.3% + hold','rr_min':1.5},
-            'market_errors':errors[:15],'note':'V3.8.1：RS放寬至前30%、最低分68；其餘進場確認、過熱控制與RR至少1.5維持不變。最多5檔。'}
+            'market_errors':errors[:15],'note':'V3.8.2：新增上市＋上櫃官方現股當沖資格硬過濾；不可當沖股票不計分、不占Top 5。其餘V3.8.1條件不變。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v381.py
+          python /tmp/v382.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
@@ -165,12 +196,12 @@ jobs:
           git fetch origin main;git reset --hard origin/main
           cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.8.1 entry confirmation radar"
+          git commit -m "Update V3.8.2 day-trade radar"
           for i in 1 2 3 4;do
             git push origin HEAD:main && exit 0
             git fetch origin main;git reset --hard origin/main
             cp /tmp/v37.json v37-intraday.json;git add v37-intraday.json
-            git diff --cached --quiet || git commit -m "Update V3.8.1 entry confirmation radar"
+            git diff --cached --quiet || git commit -m "Update V3.8.2 day-trade radar"
             sleep $((i*2))
           done
           exit 1
