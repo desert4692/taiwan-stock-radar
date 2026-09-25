@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V2.5.1
+name: Update Taiwan Market Data V2.5.2
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-market-v251
+  group: update-market-v252
   cancel-in-progress: true
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
           S=requests.Session()
-          S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.5.1'})
+          S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.5.2'})
           out={'updated_at':now.isoformat(),'quote_date':now.strftime('%Y-%m-%d'),
                'twse':[],'tpex':[],'errors':[]}
 
@@ -124,6 +124,28 @@ jobs:
           with open(tmp,'w',encoding='utf-8') as f:
               json.dump(out,f,ensure_ascii=False,separators=(',',':'))
           os.replace(tmp,'market.json')
+
+          # V2.5.2: keep a compact daily close history for MA5.
+          # One snapshot per quote_date; retain latest 30 trading days.
+          try:
+              old=json.load(open('daily-history.json',encoding='utf-8'))
+              days=old.get('days',[]) if isinstance(old,dict) else []
+          except Exception:
+              days=[]
+          closes={}
+          for x in out['twse']+out['tpex']:
+              c=str(x.get('code','')); px=n(x.get('close'))
+              if re.fullmatch(r'\d{4}',c) and px is not None:
+                  closes[c]={'close':px,'market':x.get('market'),'name':x.get('name','')}
+          day={'date':out['quote_date'],'closes':closes}
+          days=[d for d in days if isinstance(d,dict) and d.get('date')!=out['quote_date']]
+          days.append(day)
+          days=sorted(days,key=lambda d:d.get('date',''))[-30:]
+          hist={'version':'1.0','updated_at':now.isoformat(),'days':days}
+          with open('daily-history.json.tmp','w',encoding='utf-8') as f:
+              json.dump(hist,f,ensure_ascii=False,separators=(',',':'))
+          os.replace('daily-history.json.tmp','daily-history.json')
+          print('HISTORY DAYS',len(days),'LATEST',out['quote_date'],'CLOSES',len(closes))
           PY
 
       - name: Validate JSON
@@ -141,12 +163,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp market.json /tmp/market.json
+          cp daily-history.json /tmp/daily-history.json
           git fetch origin main
           git reset --hard origin/main
           cp /tmp/market.json market.json
-          git add market.json
+          cp /tmp/daily-history.json daily-history.json
+          git add market.json daily-history.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update safe market snapshot V2.5.1"
+          git commit -m "Update safe market snapshot V2.5.2"
           for i in 1 2 3; do
             git push && exit 0
             git fetch origin main
