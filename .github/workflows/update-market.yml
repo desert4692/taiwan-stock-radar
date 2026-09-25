@@ -1,4 +1,4 @@
-name: Update Taiwan Market Data V2.5
+name: Update Taiwan Market Data V2.5.1
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-market-v25
+  group: update-market-v251
   cancel-in-progress: true
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
           S=requests.Session()
-          S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.5'})
+          S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.5.1'})
           out={'updated_at':now.isoformat(),'quote_date':now.strftime('%Y-%m-%d'),
                'twse':[],'tpex':[],'errors':[]}
 
@@ -89,12 +89,16 @@ jobs:
               data=getjson('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes')
               for x in data:
                   code=str(x.get('SecuritiesCompanyCode') or x.get('Code') or '').strip().upper()
-                  if not re.fullmatch(r'\d{4,6}[A-Z]?',code): continue
+                  # Ordinary TPEx stocks are 4-digit numeric codes.
+                  # Exclude warrants, bonds, ETFs/ETNs and other exchange products.
+                  if not re.fullmatch(r'\d{4}',code): continue
+                  name=str(x.get('CompanyName') or x.get('Name') or '').strip()
+                  if not name: continue
                   close=n(x.get('Close') or x.get('ClosingPrice'))
                   if close is None: continue
                   out['tpex'].append({
                     'code':code,
-                    'name':x.get('CompanyName') or x.get('Name') or '',
+                    'name':name,
                     'market':'上櫃',
                     'close':close,
                     'change':n(x.get('Change')),
@@ -104,7 +108,8 @@ jobs:
                     'volume':n(x.get('TradingShares') or x.get('TradeVolume')),
                     'value':n(x.get('TransactionAmount') or x.get('TradeValue'))
                   })
-              if len(out['tpex'])<500: raise RuntimeError('TPEx count too low: '+str(len(out['tpex'])))
+              if not (500 <= len(out['tpex']) <= 1200):
+                  raise RuntimeError('TPEx stock count abnormal: '+str(len(out['tpex'])))
           except Exception as e:
               out['errors'].append('TPEx '+repr(e))
 
@@ -112,8 +117,8 @@ jobs:
           print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'TOTAL',total,'errors',out['errors'])
 
           # Critical guard: NEVER overwrite a good snapshot with empty/partial data.
-          if len(out['twse'])<700 or len(out['tpex'])<500 or total<1400:
-              raise SystemExit('SAFETY STOP: snapshot incomplete; market.json left unchanged')
+          if not (700 <= len(out['twse']) <= 1800 and 500 <= len(out['tpex']) <= 1200 and 1400 <= total <= 2800):
+              raise SystemExit('SAFETY STOP: stock universe abnormal; market.json left unchanged')
 
           tmp='market.json.tmp'
           with open(tmp,'w',encoding='utf-8') as f:
@@ -127,7 +132,7 @@ jobs:
           import json
           j=json.load(open('market.json',encoding='utf-8'))
           a=len(j.get('twse',[])); b=len(j.get('tpex',[]))
-          assert a>=700 and b>=500 and a+b>=1400, (a,b)
+          assert 700<=a<=1800 and 500<=b<=1200 and 1400<=a+b<=2800, (a,b)
           print("VALID:",a,b,a+b)
           PY
 
@@ -141,7 +146,7 @@ jobs:
           cp /tmp/market.json market.json
           git add market.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update safe market snapshot V2.5"
+          git commit -m "Update safe market snapshot V2.5.1"
           for i in 1 2 3; do
             git push && exit 0
             git fetch origin main
