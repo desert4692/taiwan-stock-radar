@@ -1,8 +1,8 @@
-name: V3.9.3 Intraday Day-Trade Radar
+name: V3.9.4 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v393, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v394, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -12,9 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: pip install requests beautifulsoup4 lxml
-      - name: V3.9.3 scan
+      - name: V3.9.4 scan
         run: |
-          cat > /tmp/v393.py <<'PY'
+          cat > /tmp/v394.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
@@ -129,10 +129,17 @@ jobs:
                     if len(r)>6 and n(r[6]) is not None:vals.append(n(r[6]))
                 else:
                   roc=f'{y-1911}/{m:02d}/01'
-                  j=S.get('https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock',params={'code':code,'date':roc,'response':'json'},timeout=20).json()
-                  for tb in j.get('tables') or []:
-                    for r in tb.get('data') or []:
-                      if len(r)>6 and n(r[6]) is not None:vals.append(n(r[6]))
+                  # TPEx individual daily page is stable; parse the official HTML table.
+                  rr=S.get('https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock',
+                    params={'code':code,'date':roc,'response':'html'},timeout=20)
+                  rr.raise_for_status()
+                  soup=BeautifulSoup(rr.text,'lxml')
+                  for tr in soup.find_all('tr'):
+                    cells=[td.get_text(' ',strip=True) for td in tr.find_all('td')]
+                    # 日期, 成交仟股, 成交仟元, 開盤, 最高, 最低, 收盤, 漲跌, 筆數
+                    if len(cells)>=7 and '/' in cells[0]:
+                      v=n(cells[6])
+                      if v is not None: vals.append(v)
               except Exception as e:errors.append(f'MA5 {code} '+repr(e))
               if len(vals)>=5:break
             return sum(vals[-5:])/5 if len(vals)>=5 else None
@@ -170,11 +177,11 @@ jobs:
             status='🟢 拉回轉強確認' if greenp else '🟢 突破站穩確認' if greenb else '🟡 拉回區等待轉強' if pull else '🟡 強勢但等拉回／突破' if dd<1 else '🟡 等待進場條件'
             out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,'relative_strength':round(rs),'intraday_position':round(pos*100,1),'drawdown_from_high':round(dd,2),'ma5':round(m,2) if m else None,'bias5':round(bias,2) if bias is not None else None,'volume':x['volume'],'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'高點回檔1～3%＋下一輪重新上漲0.1%以上＋量能持續','breakout_entry':round(blevel,2),'breakout_condition':'突破前次盤中高點約0.3%＋高檔站穩＋量能持續','no_chase':round(nochase,2),'stop':round(stop,2),'stop_condition':'短線防守價；綠燈風險限制3%內','take_profit1':round(tp1,2),'take_profit2':round(tp2,2),'rr':1.5,'risk_pct':round((pe-stop)/pe*100,2),'breakout_stop':round(bstop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':1.5,'breakout_risk_pct':round((be-bstop)/be*100,2),'entry_confirmed':bool(greenp or greenb),'raw_time':x['raw_time']})
           out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.9.3','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS + official daily MA5','universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(day),'daytrade_feed_ok':feed,'tpex_daytrade_live_count':len(otc),'tpex_daytrade_fallback_used':fallback,'valid_live_quotes':len(q),'scanned':len(q),'ma5_completed_count':sum(x.get('ma5') is not None for x in out),'opportunities':out,'market_errors':errors[:15],'note':'V3.9.3：保留V3.9.2穩定資料與V3.9.1訊號核心；對預篩候選補抓官方日線MA5，讓5%過熱扣分與7%乖離排除真正生效。'}
+          result={'version':'3.9.4','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS + official daily MA5','universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(day),'daytrade_feed_ok':feed,'tpex_daytrade_live_count':len(otc),'tpex_daytrade_fallback_used':fallback,'valid_live_quotes':len(q),'scanned':len(q),'ma5_completed_count':sum(x.get('ma5') is not None for x in out),'opportunities':out,'market_errors':errors[:15],'note':'V3.9.4：只修上櫃MA5。TPEx改讀官方個股日成交HTML表格的收盤欄；其餘V3.9.3掃描、當沖資格、進場與風控邏輯不變。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v393.py
+          python /tmp/v394.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
@@ -187,7 +194,7 @@ jobs:
           git add v37-intraday.json
           [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.9.3 day-trade radar"
+          git commit -m "Update V3.9.4 day-trade radar"
           for i in 1 2 3 4; do
             git push origin HEAD:main && exit 0
             git fetch origin main; git reset --hard origin/main
@@ -195,7 +202,7 @@ jobs:
             [ -f /tmp/cache.json ] && cp /tmp/cache.json v392-daytrade-cache.json || true
             git add v37-intraday.json
             [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
-            git diff --cached --quiet || git commit -m "Update V3.9.3 day-trade radar"
+            git diff --cached --quiet || git commit -m "Update V3.9.4 day-trade radar"
             sleep $((i*2))
           done
           exit 1
