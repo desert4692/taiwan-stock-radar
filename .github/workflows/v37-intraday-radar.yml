@@ -1,9 +1,8 @@
-name: V3.9.2 Intraday Day-Trade Radar
+name: V3.9.3 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v392, cancel-in-progress: true}
-
+concurrency: {group: taiwan-stock-v393, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -13,9 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: pip install requests beautifulsoup4 lxml
-      - name: V3.9.2 scan
+      - name: V3.9.3 scan
         run: |
-          cat > /tmp/v392.py <<'PY'
+          cat > /tmp/v393.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
@@ -26,38 +25,38 @@ jobs:
               return None if s in ('','-','--','---','None') else float(s)
             except:return None
           errors=[]; meta={}
-          for back in range(10):
-            if any(x['market']=='上市' for x in meta.values()): break
-            d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5: continue
-            try:
-              j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',params={'date':d.strftime('%Y%m%d'),'type':'ALL','response':'json'},timeout=35).json()
-              for tb in j.get('tables') or []:
-                for r in tb.get('data') or []:
-                  if isinstance(r,list) and len(r)>=2 and re.fullmatch(r'\d{4}',str(r[0]).strip()):
-                    c=str(r[0]).strip(); meta[c]={'name':str(r[1]).strip(),'market':'上市'}
-            except Exception as e: errors.append('TWSE universe '+repr(e))
-          for back in range(10):
-            if any(x['market']=='上櫃' for x in meta.values()): break
-            d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5: continue
-            try:
-              roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
-              r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
-              t=BeautifulSoup(r.text,'lxml').find('table')
-              if t:
-                for tr in t.find_all('tr'):
-                  z=[x.get_text(' ',strip=True) for x in tr.find_all('td')]
-                  if len(z)>=2 and re.fullmatch(r'\d{4}',z[0]): meta[z[0]]={'name':z[1],'market':'上櫃'}
-            except Exception as e: errors.append('TPEx universe '+repr(e))
           try:
-            oldm=json.load(open('market.json',encoding='utf8'))
+            m=json.load(open('market.json',encoding='utf8'))
             for market,key in [('上市','twse'),('上櫃','tpex')]:
-              for x in oldm.get(key,[]) or []:
+              for x in m.get(key,[]) or []:
                 c=str(x.get('code',''))
-                if re.fullmatch(r'\d{4}',c): meta.setdefault(c,{'name':x.get('name',c),'market':market})
+                if re.fullmatch(r'\d{4}',c): meta[c]={'name':x.get('name',c),'market':market}
           except: pass
-
+          if len(meta)<1500:
+            for back in range(10):
+              d=now.date()-datetime.timedelta(days=back)
+              if d.weekday()>=5: continue
+              try:
+                j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',params={'date':d.strftime('%Y%m%d'),'type':'ALL','response':'json'},timeout=35).json()
+                for tb in j.get('tables') or []:
+                  for r in tb.get('data') or []:
+                    if isinstance(r,list) and len(r)>=2 and re.fullmatch(r'\d{4}',str(r[0]).strip()):
+                      c=str(r[0]).strip(); meta[c]={'name':str(r[1]).strip(),'market':'上市'}
+                if len(meta)>800: break
+              except Exception as e: errors.append('TWSE universe '+repr(e))
+            for back in range(10):
+              d=now.date()-datetime.timedelta(days=back)
+              if d.weekday()>=5: continue
+              try:
+                roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
+                r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
+                t=BeautifulSoup(r.text,'lxml').find('table')
+                if t:
+                  for tr in t.find_all('tr'):
+                    z=[x.get_text(' ',strip=True) for x in tr.find_all('td')]
+                    if len(z)>=2 and re.fullmatch(r'\d{4}',z[0]): meta[z[0]]={'name':z[1],'market':'上櫃'}
+                if sum(v['market']=='上櫃' for v in meta.values())>500: break
+              except Exception as e: errors.append('TPEx universe '+repr(e))
           syms=[('tse' if m['market']=='上市' else 'otc')+'_'+c+'.tw' for c,m in meta.items()]
           rows=[]
           for i in range(0,len(syms),60):
@@ -67,9 +66,7 @@ jobs:
                 r.raise_for_status(); rows+=r.json().get('msgArray') or []; break
               except Exception as e:
                 if attempt==2: errors.append('MIS '+repr(e))
-                time.sleep(1.2*(attempt+1))
-            time.sleep(.15)
-
+                time.sleep(attempt+1)
           try:
             a=json.load(open('analysis.json',encoding='utf8'))
           except:a={}
@@ -77,166 +74,128 @@ jobs:
           for k in ('action_now','tomorrow_watch'):
             for x in a.get(k,[]) or []: hist[str(x.get('code'))]=x
           try:
-            old=json.load(open('v37-intraday.json',encoding='utf8'))
-            prev={str(x.get('code')):x for x in old.get('opportunities',[]) or []}
+            old=json.load(open('v37-intraday.json',encoding='utf8')); prev={str(x.get('code')):x for x in old.get('opportunities',[]) or []}
           except: prev={}
-
-          daytrade=set(); daytrade_errors=[]
-          def collect_codes(data):
-            out=set()
-            if isinstance(data,list):
-              for x in data: out |= collect_codes(x)
-            elif isinstance(data,dict):
-              for k,v in data.items():
+          def collect(d):
+            o=set()
+            if isinstance(d,list):
+              for x in d:o|=collect(x)
+            elif isinstance(d,dict):
+              for k,v in d.items():
                 if any(w in str(k).lower() for w in ('code','證券代號','股票代號','代號')):
                   c=str(v).strip()
-                  if re.fullmatch(r'\d{4}',c): out.add(c)
-              if not out:
-                for v in data.values():
-                  if isinstance(v,(dict,list)): out |= collect_codes(v)
-            return out
+                  if re.fullmatch(r'\d{4}',c):o.add(c)
+              for v in d.values():
+                if isinstance(v,(dict,list)):o|=collect(v)
+            return o
+          day=set(); otc=set()
           try:
-            r=S.get('https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U',timeout=30); r.raise_for_status(); daytrade |= collect_codes(r.json())
-          except Exception as e: daytrade_errors.append('TWSE daytrade '+repr(e))
-          tpex_daytrade=set()
+            r=S.get('https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U',timeout=30);r.raise_for_status();day|=collect(r.json())
+          except Exception as e:errors.append('TWSE daytrade '+repr(e))
           for attempt in range(4):
             try:
-              r=S.get('https://www.tpex.org.tw/openapi/v1/tpex_securities',timeout=30)
-              r.raise_for_status()
-              tpex_daytrade |= collect_codes(r.json())
-              if len(tpex_daytrade)>=100: break
+              r=S.get('https://www.tpex.org.tw/openapi/v1/tpex_securities',timeout=30);r.raise_for_status();otc|=collect(r.json())
+              if len(otc)>=100:break
             except Exception as e:
-              if attempt==3: daytrade_errors.append('TPEx daytrade '+repr(e))
+              if attempt==3:errors.append('TPEx daytrade '+repr(e))
               time.sleep(2*(attempt+1))
-          daytrade |= tpex_daytrade
-
-          # V3.9.2 safety fallback: if TPEx temporarily returns 5xx/520, reuse only
-          # previously verified OTC eligible codes saved by this workflow.
-          cache={}
+          fallback=False
           try:
             cache=json.load(open('v392-daytrade-cache.json',encoding='utf8'))
-          except: pass
-          cache_date=str(cache.get('updated_at',''))[:10]
-          cached_otc=set(str(c) for c in cache.get('tpex_codes',[]) if re.fullmatch(r'\d{4}',str(c)))
-          cache_age=(now.date()-datetime.date.fromisoformat(cache_date)).days if cache_date else 999
-          tpex_fallback_used=False
-          if len(tpex_daytrade)<100 and cached_otc and cache_age<=7:
-            daytrade |= cached_otc
-            tpex_fallback_used=True
-            errors.append('TPEx daytrade live feed unavailable; used verified cache <=7 days old')
-          elif len(tpex_daytrade)>=100:
-            json.dump({'updated_at':now.isoformat(),'tpex_codes':sorted(tpex_daytrade)},
-                      open('v392-daytrade-cache.json','w',encoding='utf8'),
-                      ensure_ascii=False,separators=(',',':'))
-
-          errors += daytrade_errors
-          # Require a plausible combined universe. If neither live nor safe cache gives
-          # enough coverage, suppress signals rather than silently scanning half-market.
-          daytrade_feed_ok=len(daytrade)>=1400
-
+            cd=datetime.date.fromisoformat(str(cache.get('updated_at'))[:10]); co=set(map(str,cache.get('tpex_codes',[])))
+          except: cd=None;co=set()
+          if len(otc)<100 and co and cd and (now.date()-cd).days<=7:otc=co;fallback=True
+          if len(otc)>=100:
+            json.dump({'updated_at':now.isoformat(),'tpex_codes':sorted(otc)},open('v392-daytrade-cache.json','w'),ensure_ascii=False)
+          day|=otc; feed=len(day)>=1400
           q=[]
           for z in rows:
-            c=str(z.get('c') or ''); px=n(z.get('z')); ref=n(z.get('y'))
-            if not re.fullmatch(r'\d{4}',c) or px is None or not ref or ref<=0: continue
-            if not daytrade_feed_ok or c not in daytrade: continue
-            op=n(z.get('o')); hi=n(z.get('h')); lo=n(z.get('l')); vol=n(z.get('v')); tm=str(z.get('t') or '').strip()
-            if not (tm or op is not None or hi is not None or lo is not None or (vol or 0)>0): continue
-            q.append({'code':c,'name':z.get('n') or meta.get(c,{}).get('name',c),'market':meta.get(c,{}).get('market'),
-              'close':px,'reference':ref,'open':op,'high':hi,'low':lo,'volume':vol or 0,'pct':(px/ref-1)*100,'raw_time':tm})
-
+            code=str(z.get('c') or '');c=n(z.get('z'));ref=n(z.get('y'))
+            if not re.fullmatch(r'\d{4}',code) or c is None or not ref or not feed or code not in day:continue
+            op=n(z.get('o'));hi=n(z.get('h'));lo=n(z.get('l'));vol=n(z.get('v')) or 0
+            if not (z.get('t') or op or hi or lo or vol):continue
+            q.append({'code':code,'name':z.get('n') or meta.get(code,{}).get('name',code),'market':meta.get(code,{}).get('market'),'close':c,'reference':ref,'open':op,'high':hi,'low':lo,'volume':vol,'pct':(c/ref-1)*100,'raw_time':z.get('t')})
           ps=sorted(x['pct'] for x in q)
-          def rank(v): return 100*sum(z<=v for z in ps)/len(ps) if ps else 50
+          def rank(v):return 100*sum(z<=v for z in ps)/len(ps) if ps else 50
+          def ma5(code,market):
+            vals=[]
+            for moff in range(3):
+              y=now.year;m=now.month-moff
+              while m<=0:y-=1;m+=12
+              try:
+                if market=='上市':
+                  j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',params={'date':f'{y}{m:02d}01','stockNo':code,'response':'json'},timeout=20).json()
+                  for r in j.get('data') or []:
+                    if len(r)>6 and n(r[6]) is not None:vals.append(n(r[6]))
+                else:
+                  roc=f'{y-1911}/{m:02d}/01'
+                  j=S.get('https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock',params={'code':code,'date':roc,'response':'json'},timeout=20).json()
+                  for tb in j.get('tables') or []:
+                    for r in tb.get('data') or []:
+                      if len(r)>6 and n(r[6]) is not None:vals.append(n(r[6]))
+              except Exception as e:errors.append(f'MA5 {code} '+repr(e))
+              if len(vals)>=5:break
+            return sum(vals[-5:])/5 if len(vals)>=5 else None
+          pre=[]
+          for x in q:
+            c=x['close'];hi=x['high'] or c;lo=x['low'] or c;pos=(c-lo)/(hi-lo) if hi>lo else .5
+            if c>=5 and 1.5<=x['pct']<=8 and pos>=.6 and rank(x['pct'])>=70:pre.append(x)
+          pre=sorted(pre,key=lambda x:rank(x['pct']),reverse=True)[:35]
+          mc={}
+          for x in pre:
+            v=n(hist.get(x['code'],{}).get('ma5'))
+            if v is None:v=ma5(x['code'],x['market']);time.sleep(.08)
+            if v:mc[x['code']]=v
           out=[]
           for x in q:
-            c=x['close']; pct=x['pct']; hi=x['high'] or c; lo=x['low'] or c; op=x['open'] or c
-            if c<5 or pct<1.5 or pct>8: continue
-            pos=(c-lo)/(hi-lo) if hi>lo else .5; rs=rank(pct)
-            if pos<.60 or rs<70: continue
-            h=hist.get(x['code'],{}); ma5=n(h.get('ma5')); mom=n(h.get('momentum_score') or h.get('strength')) or 50
-            ent=n(h.get('entry')) or 50; heat=n(h.get('sector_heat')) or 0
-            bias=(c/ma5-1)*100 if ma5 else None
-            if bias is not None and bias>7: continue
+            c=x['close'];pct=x['pct'];hi=x['high'] or c;lo=x['low'] or c;op=x['open'] or c
+            if c<5 or not 1.5<=pct<=8:continue
+            pos=(c-lo)/(hi-lo) if hi>lo else .5;rs=rank(pct)
+            if pos<.6 or rs<70:continue
+            h=hist.get(x['code'],{});m=mc.get(x['code']) or n(h.get('ma5'));bias=(c/m-1)*100 if m else None
+            if bias is not None and bias>7:continue
+            mom=n(h.get('momentum_score') or h.get('strength')) or 50;ent=n(h.get('entry')) or 50;heat=n(h.get('sector_heat')) or 0
             impulse=50+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=op else 0)+(10 if pos>=.7 else 0)
-            score=impulse*.35+rs*.30+mom*.15+ent*.10+heat*.10
-            if pct>=6: score-=12
-            if bias is not None and bias>5: score-=10
+            score=impulse*.35+rs*.30+mom*.15+ent*.10+heat*.10-(12 if pct>=6 else 0)-(10 if bias is not None and bias>5 else 0)
             score=round(max(0,min(100,score)))
-            if score<68: continue
-
-            dd=(hi-c)/hi*100 if hi else 0; pl=hi*.97; ph=hi*.99
-            support=max(lo,ma5*.995 if ma5 else lo)
-            pull_price_ok=1<=dd<=3 and c>=support
-            pv=prev.get(x['code'],{}); pc=n(pv.get('close')); pvol=n(pv.get('volume'))
-            vol_ok=(pvol is None or x['volume']>=pvol)
-            rising=(pc is not None and c>=pc*1.001)
-            pull_confirm=pull_price_ok and rising and vol_ok and pos>=.65
-
-            old_break=n(pv.get('breakout_entry'))
-            breakout_level=old_break if old_break else hi*1.003
-            break_confirm=old_break is not None and c>=old_break*1.003 and c>=op and vol_ok and pos>=.75
-
-            pull_entry=c if pull_confirm else (pl+ph)/2
-            # Intraday stop risk capped at 3%; prefer structural support when closer.
-            structural=max(support*.995,pull_entry*.97)
-            pull_stop=max(structural,pull_entry*.97)
-            prisk=max(.01,pull_entry-pull_stop); pt1=pull_entry+prisk*1.5; pt2=pull_entry+prisk*2.5
-            br_entry=c if break_confirm else breakout_level
-            br_stop=max(support,br_entry*.975,br_entry*.97); brisk=max(.01,br_entry-br_stop)
-            bt1=br_entry+brisk*1.5; bt2=br_entry+brisk*2.5; no_chase=br_entry*1.018
-            pull_rr=(pt1-pull_entry)/prisk; break_rr=(bt1-br_entry)/brisk
-            pull_risk=(pull_entry-pull_stop)/pull_entry*100; break_risk=(br_entry-br_stop)/br_entry*100
-            green_pull=pull_confirm and pull_rr>=1.5 and pull_risk<=3
-            green_break=break_confirm and c<=no_chase and break_rr>=1.5 and break_risk<=3
-            if green_pull: status='🟢 拉回轉強確認'
-            elif green_break: status='🟢 突破站穩確認'
-            elif pull_price_ok: status='🟡 拉回區等待轉強'
-            elif dd<1: status='🟡 強勢但等拉回／突破'
-            else: status='🟡 等待進場條件'
-            out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,
-              'relative_strength':round(rs),'intraday_position':round(pos*100,1),'drawdown_from_high':round(dd,2),
-              'ma5':round(ma5,2) if ma5 else None,'bias5':round(bias,2) if bias is not None else None,'volume':x['volume'],
-              'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'高點回檔1～3%＋下一輪重新上漲0.1%以上＋量能持續',
-              'breakout_entry':round(breakout_level,2),'breakout_condition':'突破前次盤中高點約0.3%＋高檔站穩＋量能持續',
-              'no_chase':round(no_chase,2),'stop':round(pull_stop,2),'stop_condition':'短線防守價；綠燈風險限制3%內',
-              'take_profit1':round(pt1,2),'take_profit2':round(pt2,2),'rr':round(pull_rr,2),'risk_pct':round(pull_risk,2),
-              'breakout_stop':round(br_stop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':round(break_rr,2),
-              'breakout_risk_pct':round(break_risk,2),'entry_confirmed':bool(green_pull or green_break),'raw_time':x['raw_time']})
+            if score<68:continue
+            dd=(hi-c)/hi*100;pl=hi*.97;ph=hi*.99;support=max(lo,m*.995 if m else lo)
+            pv=prev.get(x['code'],{});pc=n(pv.get('close'));pvol=n(pv.get('volume'));volok=pvol is None or x['volume']>=pvol
+            pull=1<=dd<=3 and c>=support;pullok=pull and pc is not None and c>=pc*1.001 and volok and pos>=.65
+            oldb=n(pv.get('breakout_entry'));blevel=oldb if oldb else hi*1.003
+            brok=oldb is not None and c>=oldb*1.003 and c>=op and volok and pos>=.75
+            pe=c if pullok else (pl+ph)/2;stop=max(support*.995,pe*.97);risk=max(.01,pe-stop);tp1=pe+1.5*risk;tp2=pe+2.5*risk
+            be=c if brok else blevel;bstop=max(support,be*.975);brisk=max(.01,be-bstop);bt1=be+1.5*brisk;bt2=be+2.5*brisk;nochase=be*1.018
+            greenp=pullok and (pe-stop)/pe*100<=3;greenb=brok and c<=nochase and (be-bstop)/be*100<=3
+            status='🟢 拉回轉強確認' if greenp else '🟢 突破站穩確認' if greenb else '🟡 拉回區等待轉強' if pull else '🟡 強勢但等拉回／突破' if dd<1 else '🟡 等待進場條件'
+            out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,'relative_strength':round(rs),'intraday_position':round(pos*100,1),'drawdown_from_high':round(dd,2),'ma5':round(m,2) if m else None,'bias5':round(bias,2) if bias is not None else None,'volume':x['volume'],'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'高點回檔1～3%＋下一輪重新上漲0.1%以上＋量能持續','breakout_entry':round(blevel,2),'breakout_condition':'突破前次盤中高點約0.3%＋高檔站穩＋量能持續','no_chase':round(nochase,2),'stop':round(stop,2),'stop_condition':'短線防守價；綠燈風險限制3%內','take_profit1':round(tp1,2),'take_profit2':round(tp2,2),'rr':1.5,'risk_pct':round((pe-stop)/pe*100,2),'breakout_stop':round(bstop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':1.5,'breakout_risk_pct':round((be-bstop)/be*100,2),'entry_confirmed':bool(greenp or greenb),'raw_time':x['raw_time']})
           out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.9.2','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
-            'universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(daytrade),'daytrade_feed_ok':daytrade_feed_ok,
-            'tpex_daytrade_live_count':len(tpex_daytrade),'tpex_daytrade_fallback_used':tpex_fallback_used,
-            'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
-            'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':30,'score_min':68,'bias5_exclude_above':7,
-              'pullback':'1~3% + next-scan +0.1% re-acceleration + volume','breakout':'prior level +0.3% + high-position hold + volume',
-              'green_stop_risk_max_pct':3,'rr_min':1.5},
-            'market_errors':errors[:15],
-            'note':'V3.9.2：保留V3.9.1訊號邏輯；TPEx當沖資格加入4次重試、7日已驗證快取備援與全市場覆蓋安全閘。MA5仍優先使用analysis.json；缺值不會被誤當成0乖離。'}
+          result={'version':'3.9.3','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS + official daily MA5','universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(day),'daytrade_feed_ok':feed,'tpex_daytrade_live_count':len(otc),'tpex_daytrade_fallback_used':fallback,'valid_live_quotes':len(q),'scanned':len(q),'ma5_completed_count':sum(x.get('ma5') is not None for x in out),'opportunities':out,'market_errors':errors[:15],'note':'V3.9.3：保留V3.9.2穩定資料與V3.9.1訊號核心；對預篩候選補抓官方日線MA5，讓5%過熱扣分與7%乖離排除真正生效。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v392.py
-
+          python /tmp/v393.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp v37-intraday.json /tmp/v37.json
-          [ -f v392-daytrade-cache.json ] && cp v392-daytrade-cache.json /tmp/v392-cache.json || true
+          [ -f v392-daytrade-cache.json ] && cp v392-daytrade-cache.json /tmp/cache.json || true
           git fetch origin main; git reset --hard origin/main
           cp /tmp/v37.json v37-intraday.json
-          [ -f /tmp/v392-cache.json ] && cp /tmp/v392-cache.json v392-daytrade-cache.json || true
+          [ -f /tmp/cache.json ] && cp /tmp/cache.json v392-daytrade-cache.json || true
           git add v37-intraday.json
           [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.9.2 day-trade radar"
+          git commit -m "Update V3.9.3 day-trade radar"
           for i in 1 2 3 4; do
             git push origin HEAD:main && exit 0
             git fetch origin main; git reset --hard origin/main
             cp /tmp/v37.json v37-intraday.json
-            [ -f /tmp/v392-cache.json ] && cp /tmp/v392-cache.json v392-daytrade-cache.json || true
+            [ -f /tmp/cache.json ] && cp /tmp/cache.json v392-daytrade-cache.json || true
             git add v37-intraday.json
             [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
-            git diff --cached --quiet || git commit -m "Update V3.9.2 day-trade radar"
+            git diff --cached --quiet || git commit -m "Update V3.9.3 day-trade radar"
             sleep $((i*2))
           done
           exit 1
