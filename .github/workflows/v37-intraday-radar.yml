@@ -1,8 +1,8 @@
-name: V3.9.1 Intraday Day-Trade Radar
+name: V3.9.2 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v391, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v392, cancel-in-progress: true}
 
 jobs:
   scan:
@@ -13,9 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: pip install requests beautifulsoup4 lxml
-      - name: V3.9.1 scan
+      - name: V3.9.2 scan
         run: |
-          cat > /tmp/v391.py <<'PY'
+          cat > /tmp/v392.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
@@ -98,10 +98,41 @@ jobs:
           try:
             r=S.get('https://openapi.twse.com.tw/v1/exchangeReport/TWTB4U',timeout=30); r.raise_for_status(); daytrade |= collect_codes(r.json())
           except Exception as e: daytrade_errors.append('TWSE daytrade '+repr(e))
+          tpex_daytrade=set()
+          for attempt in range(4):
+            try:
+              r=S.get('https://www.tpex.org.tw/openapi/v1/tpex_securities',timeout=30)
+              r.raise_for_status()
+              tpex_daytrade |= collect_codes(r.json())
+              if len(tpex_daytrade)>=100: break
+            except Exception as e:
+              if attempt==3: daytrade_errors.append('TPEx daytrade '+repr(e))
+              time.sleep(2*(attempt+1))
+          daytrade |= tpex_daytrade
+
+          # V3.9.2 safety fallback: if TPEx temporarily returns 5xx/520, reuse only
+          # previously verified OTC eligible codes saved by this workflow.
+          cache={}
           try:
-            r=S.get('https://www.tpex.org.tw/openapi/v1/tpex_securities',timeout=30); r.raise_for_status(); daytrade |= collect_codes(r.json())
-          except Exception as e: daytrade_errors.append('TPEx daytrade '+repr(e))
-          errors += daytrade_errors; daytrade_feed_ok=len(daytrade)>=100
+            cache=json.load(open('v392-daytrade-cache.json',encoding='utf8'))
+          except: pass
+          cache_date=str(cache.get('updated_at',''))[:10]
+          cached_otc=set(str(c) for c in cache.get('tpex_codes',[]) if re.fullmatch(r'\d{4}',str(c)))
+          cache_age=(now.date()-datetime.date.fromisoformat(cache_date)).days if cache_date else 999
+          tpex_fallback_used=False
+          if len(tpex_daytrade)<100 and cached_otc and cache_age<=7:
+            daytrade |= cached_otc
+            tpex_fallback_used=True
+            errors.append('TPEx daytrade live feed unavailable; used verified cache <=7 days old')
+          elif len(tpex_daytrade)>=100:
+            json.dump({'updated_at':now.isoformat(),'tpex_codes':sorted(tpex_daytrade)},
+                      open('v392-daytrade-cache.json','w',encoding='utf8'),
+                      ensure_ascii=False,separators=(',',':'))
+
+          errors += daytrade_errors
+          # Require a plausible combined universe. If neither live nor safe cache gives
+          # enough coverage, suppress signals rather than silently scanning half-market.
+          daytrade_feed_ok=len(daytrade)>=1400
 
           q=[]
           for z in rows:
@@ -171,33 +202,41 @@ jobs:
               'breakout_stop':round(br_stop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':round(break_rr,2),
               'breakout_risk_pct':round(break_risk,2),'entry_confirmed':bool(green_pull or green_break),'raw_time':x['raw_time']})
           out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.9.1','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
+          result={'version':'3.9.2','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS getStockInfo',
             'universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(daytrade),'daytrade_feed_ok':daytrade_feed_ok,
+            'tpex_daytrade_live_count':len(tpex_daytrade),'tpex_daytrade_fallback_used':tpex_fallback_used,
             'valid_live_quotes':len(q),'scanned':len(q),'opportunities':out,
             'rules':{'pct':'1.5~8%','position_min':60,'relative_strength_top_pct':30,'score_min':68,'bias5_exclude_above':7,
               'pullback':'1~3% + next-scan +0.1% re-acceleration + volume','breakout':'prior level +0.3% + high-position hold + volume',
               'green_stop_risk_max_pct':3,'rr_min':1.5},
             'market_errors':errors[:15],
-            'note':'V3.9.1完整獨立版：不再動態讀取舊workflow；加強二次轉強/突破確認、量能持續與3%內綠燈風險。'}
+            'note':'V3.9.2：保留V3.9.1訊號邏輯；TPEx當沖資格加入4次重試、7日已驗證快取備援與全市場覆蓋安全閘。MA5仍優先使用analysis.json；缺值不會被誤當成0乖離。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v391.py
+          python /tmp/v392.py
 
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp v37-intraday.json /tmp/v37.json
+          [ -f v392-daytrade-cache.json ] && cp v392-daytrade-cache.json /tmp/v392-cache.json || true
           git fetch origin main; git reset --hard origin/main
-          cp /tmp/v37.json v37-intraday.json; git add v37-intraday.json
+          cp /tmp/v37.json v37-intraday.json
+          [ -f /tmp/v392-cache.json ] && cp /tmp/v392-cache.json v392-daytrade-cache.json || true
+          git add v37-intraday.json
+          [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.9.1 day-trade radar"
+          git commit -m "Update V3.9.2 day-trade radar"
           for i in 1 2 3 4; do
             git push origin HEAD:main && exit 0
             git fetch origin main; git reset --hard origin/main
-            cp /tmp/v37.json v37-intraday.json; git add v37-intraday.json
-            git diff --cached --quiet || git commit -m "Update V3.9.1 day-trade radar"
+            cp /tmp/v37.json v37-intraday.json
+            [ -f /tmp/v392-cache.json ] && cp /tmp/v392-cache.json v392-daytrade-cache.json || true
+            git add v37-intraday.json
+            [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
+            git diff --cached --quiet || git commit -m "Update V3.9.2 day-trade radar"
             sleep $((i*2))
           done
           exit 1
