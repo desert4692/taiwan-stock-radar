@@ -1,14 +1,17 @@
-name: Update Taiwan Market Data
+name: Update Taiwan Market Data V2.5
 
 on:
   workflow_dispatch:
   schedule:
-    # Taiwan 09:00-14:00, weekdays, every 10 min
     - cron: '0,10,20,30,40,50 1-5 * * 1-5'
     - cron: '0 6 * * 1-5'
 
 permissions:
   contents: write
+
+concurrency:
+  group: update-market-v25
+  cancel-in-progress: true
 
 jobs:
   update:
@@ -18,111 +21,131 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install parser
-        run: pip install requests beautifulsoup4 lxml
-      - name: Fetch current-day TWSE and TPEx
+      - name: Install
+        run: pip install requests
+      - name: Build safe market snapshot
         run: |
           python - <<'PY'
-          import json,re,time,datetime,requests
-          from bs4 import BeautifulSoup
-
+          import json,re,time,datetime,requests,os
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
-          headers={'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.4.1'}
-          out={'updated_at':now.isoformat(),'quote_date':None,'twse':[],'tpex':[],'errors':[]}
+          S=requests.Session()
+          S.headers.update({'User-Agent':'Mozilla/5.0 TaiwanStockRadar/2.5'})
+          out={'updated_at':now.isoformat(),'quote_date':now.strftime('%Y-%m-%d'),
+               'twse':[],'tpex':[],'errors':[]}
 
-          def num(v):
+          def n(v):
               if v is None:return None
               s=str(v).replace(',','').replace('+','').strip()
-              if s in ('','---','--','--.--'):return None
+              if s in ('','---','--','--.--','除權','除息'):return None
               try:return float(s)
               except:return None
 
-          def get(url,**kw):
+          def getjson(url,params=None,tries=4):
               last=None
-              for n in range(3):
+              for i in range(tries):
                   try:
-                      r=requests.get(url,**kw);r.raise_for_status();return r
+                      r=S.get(url,params=params,timeout=35); r.raise_for_status()
+                      return r.json()
                   except Exception as e:
-                      last=e
-                      if n<2:time.sleep(2*(n+1))
+                      last=e; time.sleep(1.5*(i+1))
               raise last
 
-          # IMPORTANT:
-          # STOCK_DAY_ALL can lag one trading day. Use MI_INDEX for the requested
-          # trading date and overwrite the snapshot with that day's official data.
+          # TWSE: current official all-stock snapshot, stable OpenAPI fallback.
           try:
-              date=now.strftime('%Y%m%d')
-              u='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
-              r=get(u,params={'date':date,'type':'ALL','response':'json'},headers=headers,timeout=40)
-              j=r.json()
-              if j.get('stat')!='OK':
-                  raise RuntimeError('MI_INDEX stat='+str(j.get('stat')))
+              j=getjson('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
+                        {'date':now.strftime('%Y%m%d'),'type':'ALL','response':'json'})
               found={}
               for t in j.get('tables') or []:
                   for row in t.get('data') or []:
-                      if not isinstance(row,list) or len(row)<9:continue
+                      if not isinstance(row,list) or len(row)<11: continue
                       code=str(row[0]).strip().upper()
-                      if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
-                      # Security quote table layout:
-                      # code,name,volume,trades,value,open,high,low,close,sign,change,...
-                      close=num(row[8])
-                      if close is None:continue
-                      sign=str(row[9]).strip() if len(row)>9 else ''
-                      change=num(row[10]) if len(row)>10 else None
-                      if change is not None and ('-' in sign or 'green' in sign.lower()):
-                          change=-abs(change)
-                      found[code]={
-                        'code':code,'name':str(row[1]).strip(),'market':'上市',
-                        'volume':num(row[2]),'value':num(row[4]),'open':num(row[5]),
-                        'high':num(row[6]),'low':num(row[7]),'close':close,'change':change
-                      }
-              if not found:raise RuntimeError('MI_INDEX returned no security quotes')
+                      if not re.fullmatch(r'\d{4,6}[A-Z]?',code): continue
+                      close=n(row[8])
+                      if close is None: continue
+                      ch=n(row[10]); sign=str(row[9])
+                      if ch is not None and ('-' in sign or 'green' in sign.lower()): ch=-abs(ch)
+                      found[code]={'code':code,'name':str(row[1]).strip(),'market':'上市',
+                        'volume':n(row[2]),'value':n(row[4]),'open':n(row[5]),
+                        'high':n(row[6]),'low':n(row[7]),'close':close,'change':ch}
               out['twse']=list(found.values())
-              out['quote_date']=now.strftime('%Y-%m-%d')
+              if len(out['twse'])<700: raise RuntimeError('TWSE count too low: '+str(len(out['twse'])))
           except Exception as e:
-              out['errors'].append('TWSE MI_INDEX: '+repr(e))
-              # Fallback only; mark date unknown so UI won't claim today's quote.
+              out['errors'].append('TWSE MI_INDEX '+repr(e))
               try:
-                  u='https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
-                  data=get(u,headers=headers,timeout=30).json()
+                  data=getjson('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL')
                   for x in data:
                       code=str(x.get('Code','')).strip().upper()
-                      if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
-                      out['twse'].append({
-                        'code':code,'name':x.get('Name',''),'market':'上市',
-                        'close':num(x.get('ClosingPrice')),'open':num(x.get('OpeningPrice')),
-                        'high':num(x.get('HighestPrice')),'low':num(x.get('LowestPrice')),
-                        'volume':num(x.get('TradeVolume')),'value':num(x.get('TradeValue')),
-                        'change':num(x.get('Change'))
-                      })
-              except Exception as e2:out['errors'].append('TWSE fallback: '+repr(e2))
+                      if re.fullmatch(r'\d{4,6}[A-Z]?',code) and n(x.get('ClosingPrice')) is not None:
+                          out['twse'].append({'code':code,'name':x.get('Name',''),'market':'上市',
+                            'close':n(x.get('ClosingPrice')),'open':n(x.get('OpeningPrice')),
+                            'high':n(x.get('HighestPrice')),'low':n(x.get('LowestPrice')),
+                            'volume':n(x.get('TradeVolume')),'value':n(x.get('TradeValue')),
+                            'change':n(x.get('Change'))})
+              except Exception as e2: out['errors'].append('TWSE fallback '+repr(e2))
 
+          # TPEx: official OpenAPI. This avoids the retired/changed legacy HTML endpoint.
           try:
-              u='https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=htm'
-              r=get(u,headers=headers,timeout=30)
-              soup=BeautifulSoup(r.text,'lxml');table=soup.find('table')
-              if not table:raise RuntimeError('TPEx table not found')
-              for tr in table.find_all('tr'):
-                  td=[c.get_text(' ',strip=True) for c in tr.find_all('td')]
-                  if len(td)<10:continue
-                  code=td[0].strip().upper()
-                  if not re.fullmatch(r'[0-9]{4,6}[A-Z]?',code):continue
-                  out['tpex'].append({'code':code,'name':td[1],'market':'上櫃',
-                    'close':num(td[2]),'change':num(td[3]),'open':num(td[4]),
-                    'high':num(td[5]),'low':num(td[6]),'volume':num(td[8]),'value':num(td[9])})
-          except Exception as e:out['errors'].append('TPEx: '+repr(e))
+              data=getjson('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes')
+              for x in data:
+                  code=str(x.get('SecuritiesCompanyCode') or x.get('Code') or '').strip().upper()
+                  if not re.fullmatch(r'\d{4,6}[A-Z]?',code): continue
+                  close=n(x.get('Close') or x.get('ClosingPrice'))
+                  if close is None: continue
+                  out['tpex'].append({
+                    'code':code,
+                    'name':x.get('CompanyName') or x.get('Name') or '',
+                    'market':'上櫃',
+                    'close':close,
+                    'change':n(x.get('Change')),
+                    'open':n(x.get('Open') or x.get('OpeningPrice')),
+                    'high':n(x.get('High') or x.get('HighestPrice')),
+                    'low':n(x.get('Low') or x.get('LowestPrice')),
+                    'volume':n(x.get('TradingShares') or x.get('TradeVolume')),
+                    'value':n(x.get('TransactionAmount') or x.get('TradeValue'))
+                  })
+              if len(out['tpex'])<500: raise RuntimeError('TPEx count too low: '+str(len(out['tpex'])))
+          except Exception as e:
+              out['errors'].append('TPEx '+repr(e))
 
-          with open('market.json','w',encoding='utf-8') as f:
+          total=len(out['twse'])+len(out['tpex'])
+          print('TWSE',len(out['twse']),'TPEx',len(out['tpex']),'TOTAL',total,'errors',out['errors'])
+
+          # Critical guard: NEVER overwrite a good snapshot with empty/partial data.
+          if len(out['twse'])<700 or len(out['tpex'])<500 or total<1400:
+              raise SystemExit('SAFETY STOP: snapshot incomplete; market.json left unchanged')
+
+          tmp='market.json.tmp'
+          with open(tmp,'w',encoding='utf-8') as f:
               json.dump(out,f,ensure_ascii=False,separators=(',',':'))
-          watch={x['code']:x['close'] for x in out['twse'] if x['code'] in ('0050','00685L')}
-          print('quote_date',out['quote_date'],'watch',watch,'TWSE',len(out['twse']),'TPEx',len(out['tpex']),'errors',out['errors'])
+          os.replace(tmp,'market.json')
           PY
-      - name: Commit data
+
+      - name: Validate JSON
+        run: |
+          python - <<'PY'
+          import json
+          j=json.load(open('market.json',encoding='utf-8'))
+          a=len(j.get('twse',[])); b=len(j.get('tpex',[]))
+          assert a>=700 and b>=500 and a+b>=1400, (a,b)
+          print("VALID:",a,b,a+b)
+          PY
+
+      - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp market.json /tmp/market.json
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/market.json market.json
           git add market.json
           git diff --cached --quiet && exit 0
-          git commit -m "Fix current-day market quotes V2.4.1"
-          git push
+          git commit -m "Update safe market snapshot V2.5"
+          for i in 1 2 3; do
+            git push && exit 0
+            git fetch origin main
+            git rebase origin/main || { git rebase --abort; exit 1; }
+            sleep 2
+          done
+          exit 1
