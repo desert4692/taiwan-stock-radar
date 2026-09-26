@@ -1,17 +1,16 @@
-name: V3.7.1.1 Preopen Auction Probe
+name: V3.7.1.2 Preopen Auction Probe
 
 on:
   workflow_dispatch:
   schedule:
-    # Taiwan weekdays 08:30-08:59 (UTC+8)
-    - cron: '30,35,40,45,50,55 0 * * 1-5'
-    - cron: '58 0 * * 1-5'
+    # Taiwan weekdays 08:30-08:58 (UTC+8)
+    - cron: '30,35,40,45,50,55,58 0 * * 1-5'
 
 permissions:
   contents: write
 
 concurrency:
-  group: taiwan-stock-v3711-preopen
+  group: taiwan-stock-v3712-preopen
   cancel-in-progress: true
 
 jobs:
@@ -19,126 +18,75 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: {fetch-depth: 0}
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install requests beautifulsoup4 lxml
-
-      - name: Build independent symbol universe and probe MIS
+        with: {python-version: '3.12'}
+      - run: pip install requests
+      - name: V3.7.1.2 frozen preopen probe
         run: |
-          cat > /tmp/v3711.py <<'PY'
-          import requests,json,datetime,time,re
-          from bs4 import BeautifulSoup
-
+          cat > /tmp/v3712.py <<'PY'
+          import requests,json,datetime,time,re,sys
           TZ=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(TZ)
-          S=requests.Session()
-          S.headers.update({
-            'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36',
-            'Referer':'https://mis.twse.com.tw/stock/index.jsp',
-            'Accept':'application/json,text/plain,*/*'
-          })
+
+          # Hard freeze: a delayed/manual run after 09:00 must never overwrite preopen data.
+          if (now.hour,now.minute) >= (9,0):
+            print('PREOPEN FROZEN: Taiwan time',now.isoformat())
+            sys.exit(0)
 
           def num(v):
             try:
               s=str(v).replace(',','').replace('+','').strip()
-              if s in ('','-','--','---','None'):return None
-              return float(s)
+              return None if s in ('','-','--','---','None') else float(s)
             except:return None
 
+          try:
+            market=json.load(open('market.json',encoding='utf8'))
+          except Exception as e:
+            raise SystemExit('market.json unavailable: '+repr(e))
+
           meta={}
-          errors=[]
+          for mk,key in [('上市','twse'),('上櫃','tpex')]:
+            for x in market.get(key,[]) or []:
+              c=str(x.get('code','')).strip()
+              if re.fullmatch(r'\d{4}',c):
+                meta[c]={'name':x.get('name',c),'market':mk,'prev_close':num(x.get('close'))}
+          if len(meta)<1500:
+            raise SystemExit('SAFETY STOP: universe too small '+str(len(meta)))
 
-          # 1) Build TWSE universe independently. Try recent dates so midnight/manual runs
-          # do not depend on today's market.json.
-          for back in range(0,10):
-            if any(x.get('market')=='上市' for x in meta.values()):break
-            d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5:continue
-            try:
-              j=S.get('https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
-                params={'date':d.strftime('%Y%m%d'),'type':'ALL','response':'json'},timeout=35).json()
-              for tb in j.get('tables') or []:
-                for r in tb.get('data') or []:
-                  if not isinstance(r,list) or len(r)<9:continue
-                  c=str(r[0]).strip()
-                  if re.fullmatch(r'\d{4}',c):
-                    meta[c]={'code':c,'name':str(r[1]).strip(),'market':'上市','prev_close':num(r[8])}
-            except Exception as e:
-              errors.append('TWSE universe '+repr(e))
-
-          # 2) Build TPEx universe independently using recent ROC dates.
-          for back in range(0,10):
-            if any(x.get('market')=='上櫃' for x in meta.values()):break
-            d=now.date()-datetime.timedelta(days=back)
-            if d.weekday()>=5:continue
-            try:
-              roc=f'{d.year-1911}/{d.month:02d}/{d.day:02d}'
-              r=S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php',
-                params={'l':'zh-tw','o':'htm','d':roc},timeout=30)
-              table=BeautifulSoup(r.text,'lxml').find('table')
-              if table:
-                for tr in table.find_all('tr'):
-                  z=[x.get_text(' ',strip=True) for x in tr.find_all('td')]
-                  if len(z)>=3 and re.fullmatch(r'\d{4}',z[0]):
-                    meta[z[0]]={'code':z[0],'name':z[1],'market':'上櫃','prev_close':num(z[2])}
-            except Exception as e:
-              errors.append('TPEx universe '+repr(e))
-
-          # 3) Last-resort fallback: existing repo files may still provide symbols,
-          # but an empty market.json can no longer make the run request zero symbols.
-          if len(meta)<100:
-            for fn in ('market.json','analysis.json'):
-              try:
-                j=json.load(open(fn,encoding='utf8'))
-                if fn=='market.json':
-                  for market,key in [('上市','twse'),('上櫃','tpex')]:
-                    for x in j.get(key,[]) or []:
-                      c=str(x.get('code',''))
-                      if re.fullmatch(r'\d{4}',c):
-                        meta.setdefault(c,{'code':c,'name':x.get('name',c),'market':market,'prev_close':num(x.get('close'))})
-                else:
-                  for key in ('action_now','tomorrow_watch'):
-                    for x in j.get(key,[]) or []:
-                      c=str(x.get('code',''))
-                      if re.fullmatch(r'\d{4}',c):
-                        meta.setdefault(c,{'code':c,'name':x.get('name',c),'market':x.get('market'),'prev_close':num(x.get('close'))})
-              except:pass
-
-          symbols=[]
-          for c,m in meta.items():
-            prefix='tse' if m.get('market')=='上市' else 'otc'
-            symbols.append(prefix+'_'+c+'.tw')
-
-          def chunks(a,n):
-            for i in range(0,len(a),n):yield a[i:i+n]
-
-          rows=[]
-          url='https://mis.twse.com.tw/stock/api/getStockInfo.jsp'
-          for batch in chunks(symbols,60):
+          S=requests.Session()
+          S.headers.update({'User-Agent':'Mozilla/5.0 Chrome/153 Safari/537.36',
+                            'Referer':'https://mis.twse.com.tw/stock/index.jsp'})
+          syms=[('tse' if m['market']=='上市' else 'otc')+'_'+c+'.tw' for c,m in meta.items()]
+          rows=[]; errors=[]
+          for i in range(0,len(syms),60):
+            batch=syms[i:i+60]
             for attempt in range(3):
               try:
-                r=S.get(url,params={'ex_ch':'|'.join(batch),'json':'1','delay':'0','_':str(int(time.time()*1000))},timeout=25)
-                r.raise_for_status()
-                j=r.json()
-                rows.extend(j.get('msgArray') or [])
-                break
+                r=S.get('https://mis.twse.com.tw/stock/api/getStockInfo.jsp',
+                  params={'ex_ch':'|'.join(batch),'json':'1','delay':'0','_':str(int(time.time()*1000))},timeout=25)
+                r.raise_for_status(); rows += r.json().get('msgArray') or []; break
               except Exception as e:
-                if attempt==2:errors.append('MIS '+repr(e))
-                time.sleep(1.2*(attempt+1))
-            time.sleep(.18)
+                if attempt==2: errors.append('MIS '+repr(e))
+                time.sleep(attempt+1)
 
-          parsed=[]
+          def preopen_time_ok(t):
+            if not t:return True
+            m=re.match(r'(\d{1,2}):(\d{2})',str(t))
+            if not m:return True
+            return (int(m.group(1)),int(m.group(2))) < (9,0)
+
+          parsed=[]; rejected_postopen=0
           for z in rows:
             c=str(z.get('c') or '').strip()
             if not re.fullmatch(r'\d{4}',c):continue
+            if not preopen_time_ok(z.get('t')):
+              rejected_postopen+=1; continue
             m=meta.get(c,{})
             ref=num(z.get('y')) or m.get('prev_close')
             bids=[num(v) for v in str(z.get('b') or '').split('_')]
             asks=[num(v) for v in str(z.get('a') or '').split('_')]
-            bids=[v for v in bids if v is not None];asks=[v for v in asks if v is not None]
+            bids=[v for v in bids if v is not None]; asks=[v for v in asks if v is not None]
             bidv=[num(v) or 0 for v in str(z.get('g') or '').split('_') if str(v).strip()]
             askv=[num(v) or 0 for v in str(z.get('f') or '').split('_') if str(v).strip()]
             px=num(z.get('z'))
@@ -147,7 +95,7 @@ jobs:
               elif bids:px=bids[0]
               elif asks:px=asks[0]
             pct=(px/ref-1)*100 if px is not None and ref else None
-            bv=sum(bidv[:5]);av=sum(askv[:5])
+            bv=sum(bidv[:5]); av=sum(askv[:5])
             imb=(bv-av)/(bv+av)*100 if bv+av else 0
             parsed.append({'code':c,'name':z.get('n') or m.get('name') or c,'market':m.get('market'),
               'reference':ref,'probe_price':px,'probe_pct':round(pct,2) if pct is not None else None,
@@ -158,14 +106,21 @@ jobs:
           try:
             old=json.load(open('v371-preopen.json',encoding='utf8'))
             history=old.get('history',[])
-          except:history=[]
+          except: history=[]
 
+          # Never carry contaminated >=09:00 snapshots forward.
+          clean=[]
+          for h in history:
+            try:
+              dt=datetime.datetime.fromisoformat(h.get('at',''))
+              if (dt.hour,dt.minute)<(9,0): clean.append(h)
+            except: pass
           snap={'at':now.isoformat(),'count':len(parsed),
                 'quotes':[{k:x.get(k) for k in ('code','probe_price','probe_pct','imbalance')} for x in parsed]}
-          history=(history+[snap])[-8:]
+          history=(clean+[snap])[-8:]
           hm={}
           for h in history:
-            for q in h.get('quotes',[]):hm.setdefault(q['code'],[]).append(q)
+            for q in h.get('quotes',[]): hm.setdefault(q['code'],[]).append(q)
 
           cand=[]
           for x in parsed:
@@ -182,17 +137,20 @@ jobs:
               'status':'盤前優先觀察' if stable and spread<=1.5 and score>=70 else '資料觀察中'})
           cand=sorted(cand,key=lambda x:(x['preopen_score'],x.get('probe_pct') or -99),reverse=True)[:5]
 
-          result={'version':'3.7.1.1-test','updated_at':now.isoformat(),'mode':'PREOPEN_PROBE',
-            'source':'TWSE MIS getStockInfo','universe_size':len(meta),'requested_symbols':len(symbols),
-            'received_quotes':len(parsed),'errors':errors[:15],'top5':cand,'history':history,
-            'warning':'測試版：試撮只做盤前預警；09:00後必須由V3.7實際成交確認。'}
+          result={'version':'3.7.1.2','updated_at':now.isoformat(),'frozen_at':now.isoformat() if now.hour==8 and now.minute>=58 else None,
+            'mode':'PREOPEN_PROBE','source':'TWSE MIS getStockInfo + market.json universe',
+            'universe_size':len(meta),'requested_symbols':len(syms),'received_quotes':len(parsed),
+            'rejected_postopen_quotes':rejected_postopen,'errors':errors[:15],'top5':cand,'history':history,
+            'warning':'盤前資料只接受09:00前報價；09:00後工作流程不覆寫此檔案。'}
           json.dump(result,open('v371-preopen.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps({k:v for k,v in result.items() if k!='history'},ensure_ascii=False,indent=2))
           PY
-          python /tmp/v3711.py
+          python /tmp/v3712.py
 
       - name: Commit result safely
         run: |
+          # If the probe froze after 09:00, Python exits without changing the file.
+          git diff --quiet v371-preopen.json && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp v371-preopen.json /tmp/v371-preopen.json
@@ -201,13 +159,13 @@ jobs:
           cp /tmp/v371-preopen.json v371-preopen.json
           git add v371-preopen.json
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.7.1.1 preopen probe"
+          git commit -m "Update V3.7.1.2 frozen preopen probe"
           for i in 1 2 3 4; do
             git push origin HEAD:main && exit 0
-            git fetch origin main;git reset --hard origin/main
+            git fetch origin main; git reset --hard origin/main
             cp /tmp/v371-preopen.json v371-preopen.json
             git add v371-preopen.json
-            git diff --cached --quiet || git commit -m "Update V3.7.1.1 preopen probe"
+            git diff --cached --quiet || git commit -m "Update V3.7.1.2 frozen preopen probe"
             sleep $((i*2))
           done
           exit 1
