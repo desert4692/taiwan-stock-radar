@@ -1,10 +1,10 @@
-name: V3.9 Stable 5-Minute Intraday Scheduler
+name: V3.9.9.1 Stable 3-Minute Intraday Scheduler
 
 on:
   workflow_dispatch:
   schedule:
     # Taiwan time 08:37, Monday-Friday.
-    # One long-running scheduler then dispatches V3.8.2 every 5 minutes.
+    # One long-running scheduler then dispatches V3.8.2 every 3 minutes.
     - cron: '37 0 * * 1-5'
 
 permissions:
@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 330
 
     steps:
-      - name: Stable intraday 5-minute scheduler
+      - name: Stable intraday 3-minute scheduler
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -50,15 +50,15 @@ jobs:
             fi
 
             START=$(date +%s)
-            echo "Dispatch V3.8.2: $(TZ=Asia/Taipei date '+%F %T')"
+            echo "Dispatch V3.9.9.1: $(TZ=Asia/Taipei date '+%F %T')"
 
-            # V3.8.2 remains the scanner. V3.9 only replaces the unreliable
-            # every-5-minute GitHub cron with one persistent session scheduler.
+            # V3.9.9.1 scanner uses one persistent session scheduler.
+            # 3-minute cadence reduces confirmation delay without 1-minute noise.
             gh workflow run v37-intraday-radar.yml --repo "$REPO" --ref main || true
 
             END=$(date +%s)
             USED=$((END-START))
-            WAIT=$((300-USED))
+            WAIT=$((180-USED))
             if [ "$WAIT" -lt 20 ]; then WAIT=20; fi
 
             echo "Next dispatch in ${WAIT}s."
