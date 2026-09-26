@@ -1,8 +1,8 @@
-name: V3.9.8 Intraday Day-Trade Radar
+name: V3.9.9.1 Intraday Day-Trade Radar
 on:
   workflow_dispatch:
 permissions: {contents: write}
-concurrency: {group: taiwan-stock-v398, cancel-in-progress: true}
+concurrency: {group: taiwan-stock-v3991, cancel-in-progress: true}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -12,9 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: pip install requests beautifulsoup4 lxml
-      - name: V3.9.8 scan
+      - name: V3.9.9.1 scan
         run: |
-          cat > /tmp/v398.py <<'PY'
+          cat > /tmp/v3991.py <<'PY'
           import requests,json,datetime,time,re
           from bs4 import BeautifulSoup
           TZ=datetime.timezone(datetime.timedelta(hours=8)); now=datetime.datetime.now(TZ)
@@ -79,8 +79,12 @@ jobs:
           for k in ('action_now','tomorrow_watch'):
             for x in a.get(k,[]) or []: hist[str(x.get('code'))]=x
           try:
-            old=json.load(open('v37-intraday.json',encoding='utf8')); prev={str(x.get('code')):x for x in old.get('opportunities',[]) or []}
-          except: prev={}
+            old=json.load(open('v37-intraday.json',encoding='utf8'))
+            old_items=(old.get('tracking_pool',[]) or [])+(old.get('opportunities',[]) or [])
+            prev={str(x.get('code')):x for x in old_items}
+            prevtrack=set(prev)
+          except:
+            prev={}; prevtrack=set()
           def collect(d):
             o=set()
             if isinstance(d,list):
@@ -165,16 +169,17 @@ jobs:
           out=[]
           for x in q:
             c=x['close'];pct=x['pct'];hi=x['high'] or c;lo=x['low'] or c;op=x['open'] or c
-            if c<5 or not 1.5<=pct<=8:continue
+            was_tracked=x['code'] in prevtrack
+            if c<5 or pct>8 or pct<(1.0 if was_tracked else 1.5):continue
             pos=(c-lo)/(hi-lo) if hi>lo else .5;rs=rank(pct)
-            if pos<.6 or rs<70:continue
+            if pos<(.50 if was_tracked else .60) or rs<(60 if was_tracked else 70):continue
             h=hist.get(x['code'],{});m=mc.get(x['code']) or n(h.get('ma5'));bias=(c/m-1)*100 if m else None
             if bias is not None and bias>7:continue
             mom=n(h.get('momentum_score') or h.get('strength')) or 50;ent=n(h.get('entry')) or 50;heat=n(h.get('sector_heat')) or 0
             impulse=50+(10 if pct>=2 else 0)+(8 if pct>=3 else 0)+(8 if c>=op else 0)+(10 if pos>=.7 else 0)
             score=impulse*.35+rs*.30+mom*.15+ent*.10+heat*.10-(12 if pct>=6 else 0)-(10 if bias is not None and bias>5 else 0)
             score=round(max(0,min(100,score)))
-            if score<68:continue
+            if score<(62 if was_tracked else 68):continue
             dd=(hi-c)/hi*100;pl=hi*.97;ph=hi*.99;support=max(lo,m*.995 if m else lo)
             pv=prev.get(x['code'],{});pc=n(pv.get('close'));pvol=n(pv.get('volume'));volok=pvol is None or x['volume']>=pvol
             pull=1<=dd<=3 and c>=support;pullok=pull and pc is not None and c>=pc*1.001 and volok and pos>=.65
@@ -185,12 +190,22 @@ jobs:
             greenp=pullok and (pe-stop)/pe*100<=3;greenb=brok and c<=nochase and (be-bstop)/be*100<=3
             status='🟢 拉回轉強確認' if greenp else '🟢 突破站穩確認' if greenb else '🟡 拉回區等待轉強' if pull else '🟡 強勢但等拉回／突破' if dd<1 else '🟡 等待進場條件'
             out.append({'code':x['code'],'name':x['name'],'market':x['market'],'close':round(c,2),'pct':round(pct,2),'score':score,'status':status,'relative_strength':round(rs),'intraday_position':round(pos*100,1),'drawdown_from_high':round(dd,2),'ma5':round(m,2) if m else None,'bias5':round(bias,2) if bias is not None else None,'volume':x['volume'],'pullback_entry':[round(pl,2),round(ph,2)],'pullback_condition':'高點回檔1～3%＋下一輪重新上漲0.1%以上＋量能持續','breakout_entry':round(blevel,2),'breakout_condition':'突破前次盤中高點約0.3%＋高檔站穩＋量能持續','no_chase':round(nochase,2),'stop':round(stop,2),'stop_condition':'短線防守價；綠燈風險限制3%內','take_profit1':round(tp1,2),'take_profit2':round(tp2,2),'rr':1.5,'risk_pct':round((pe-stop)/pe*100,2),'breakout_stop':round(bstop,2),'breakout_tp1':round(bt1,2),'breakout_tp2':round(bt2,2),'breakout_rr':1.5,'breakout_risk_pct':round((be-bstop)/be*100,2),'entry_confirmed':bool(greenp or greenb),'raw_time':x['raw_time']})
-          out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]
-          result={'version':'3.9.8','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS + TWSE STOCK_DAY + local daily-history','universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(day),'daytrade_feed_ok':feed,'tpex_daytrade_live_count':len(otc),'tpex_daytrade_fallback_used':fallback,'valid_live_quotes':len(q),'scanned':len(q),'ma5_completed_count':sum(x.get('ma5') is not None for x in out),'daily_history_days':len(daily_days),'opportunities':out,'ma5_diagnostics':ma5_diag,'market_errors':errors[:15],'note':'V3.9.8：上櫃MA5改讀daily-history.json；不足5個交易日時不因缺MA5排除或扣分，滿5日後自動套用MA5/乖離率。其餘交易邏輯不變。'}
+          # V3.9.9.1: internal tracking pool up to 15; website still shows Top 5.
+          # Confirmed entry signals rank first, then entry readiness, score and RS.
+          for x in out:
+            wait_bonus=12 if '拉回區' in x['status'] else 6 if '等待' in x['status'] else 0
+            confirmed_bonus=35 if x['entry_confirmed'] else 0
+            heat_penalty=max(0,x['pct']-6)*5
+            risk_penalty=min(x['risk_pct'],x['breakout_risk_pct'])*2
+            x['entry_priority']=round(x['score']+confirmed_bonus+wait_bonus-heat_penalty-risk_penalty,1)
+          tracking=sorted(out,key=lambda x:(x['entry_confirmed'],x['entry_priority'],x['score'],x['relative_strength']),reverse=True)[:15]
+          top5=tracking[:5]
+          for i,x in enumerate(top5,1):x['rank']=i
+          result={'version':'3.9.9.1','updated_at':now.isoformat(),'trade_date':now.strftime('%Y-%m-%d'),'source':'TWSE MIS + TWSE STOCK_DAY + local daily-history','universe_size':len(meta),'received_quotes':len(rows),'daytrade_eligible_count':len(day),'daytrade_feed_ok':feed,'tpex_daytrade_live_count':len(otc),'tpex_daytrade_fallback_used':fallback,'valid_live_quotes':len(q),'scanned':len(q),'ma5_completed_count':sum(x.get('ma5') is not None for x in out),'daily_history_days':len(daily_days),'tracking_pool_count':len(tracking),'tracking_pool':tracking,'opportunities':top5,'ma5_diagnostics':ma5_diag,'market_errors':errors[:15],'note':'V3.9.9.1：每3分鐘掃描；內部追蹤最多15檔、網站維持Top 5。已確認進場條件優先排序，再依進場優先分數、強度與相對強弱排序；等待股跨輪持續追蹤，明顯轉弱或過熱才淘汰。TPEx MA5沿用daily-history.json。'}
           json.dump(result,open('v37-intraday.json','w',encoding='utf8'),ensure_ascii=False,separators=(',',':'))
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
-          python /tmp/v398.py
+          python /tmp/v3991.py
       - name: Commit safely
         run: |
           git config user.name "github-actions[bot]"
@@ -203,7 +218,7 @@ jobs:
           git add v37-intraday.json
           [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
           git diff --cached --quiet && exit 0
-          git commit -m "Update V3.9.8 day-trade radar"
+          git commit -m "Update V3.9.9.1 day-trade radar"
           for i in 1 2 3 4; do
             git push origin HEAD:main && exit 0
             git fetch origin main; git reset --hard origin/main
@@ -211,7 +226,7 @@ jobs:
             [ -f /tmp/cache.json ] && cp /tmp/cache.json v392-daytrade-cache.json || true
             git add v37-intraday.json
             [ -f v392-daytrade-cache.json ] && git add v392-daytrade-cache.json || true
-            git diff --cached --quiet || git commit -m "Update V3.9.8 day-trade radar"
+            git diff --cached --quiet || git commit -m "Update V3.9.9.1 day-trade radar"
             sleep $((i*2))
           done
           exit 1
