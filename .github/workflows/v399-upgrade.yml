@@ -1,0 +1,81 @@
+name: Install V3.9.9 Intraday Radar
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Upgrade radar and scheduler
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p=Path('.github/workflows/v37-intraday-radar.yml')
+          s=p.read_text(encoding='utf-8')
+
+          replacements=[
+            ("name: V3.9.8 Intraday Day-Trade Radar","name: V3.9.9 Intraday Day-Trade Radar"),
+            ("taiwan-stock-v398","taiwan-stock-v399"),
+            ("V3.9.8 scan","V3.9.9 scan"),
+            ("/tmp/v398.py","/tmp/v399.py"),
+            ('git commit -m "Update V3.9.8 day-trade radar"','git commit -m "Update V3.9.9 day-trade radar"'),
+            ("          try:\n            old=json.load(open('v37-intraday.json',encoding='utf8')); prev={str(x.get('code')):x for x in old.get('opportunities',[]) or []}\n          except: prev={}",
+             "          try:\n            old=json.load(open('v37-intraday.json',encoding='utf8'))\n            old_items=(old.get('tracking_pool',[]) or [])+(old.get('opportunities',[]) or [])\n            prev={str(x.get('code')):x for x in old_items}\n            prevtrack=set(prev)\n          except:\n            prev={}; prevtrack=set()"),
+            ("            if c<5 or not 1.5<=pct<=8:continue\n            pos=(c-lo)/(hi-lo) if hi>lo else .5;rs=rank(pct)\n            if pos<.6 or rs<70:continue",
+             "            was_tracked=x['code'] in prevtrack\n            if c<5 or pct>8 or pct<(1.0 if was_tracked else 1.5):continue\n            pos=(c-lo)/(hi-lo) if hi>lo else .5;rs=rank(pct)\n            if pos<(.50 if was_tracked else .60) or rs<(60 if was_tracked else 70):continue"),
+            ("            if score<68:continue","            if score<(62 if was_tracked else 68):continue"),
+            ("          out=sorted(out,key=lambda x:(x['entry_confirmed'],x['score'],x['relative_strength']),reverse=True)[:5]\n          result={'version':'3.9.8'",
+             "          # V3.9.9: internal tracking pool up to 15; website still shows Top 5.\n          for x in out:\n            wait_bonus=12 if '拉回區' in x['status'] else 6 if '等待' in x['status'] else 0\n            confirmed_bonus=35 if x['entry_confirmed'] else 0\n            heat_penalty=max(0,x['pct']-6)*5\n            risk_penalty=min(x['risk_pct'],x['breakout_risk_pct'])*2\n            x['entry_priority']=round(x['score']+confirmed_bonus+wait_bonus-heat_penalty-risk_penalty,1)\n          tracking=sorted(out,key=lambda x:(x['entry_confirmed'],x['entry_priority'],x['score'],x['relative_strength']),reverse=True)[:15]\n          top5=tracking[:5]\n          for i,x in enumerate(top5,1):x['rank']=i\n          result={'version':'3.9.9'"),
+            ("'opportunities':out,'ma5_diagnostics'","'tracking_pool_count':len(tracking),'tracking_pool':tracking,'opportunities':top5,'ma5_diagnostics'"),
+            ("'note':'V3.9.8：上櫃MA5改讀daily-history.json；不足5個交易日時不因缺MA5排除或扣分，滿5日後自動套用MA5/乖離率。其餘交易邏輯不變。'}",
+             "'note':'V3.9.9：每3分鐘掃描；內部追蹤最多15檔、網站維持Top 5。已確認進場條件優先排序，其次依進場優先分數、強度與相對強弱排序；等待股跨輪持續追蹤，明顯轉弱或過熱才淘汰。TPEx MA5沿用daily-history.json。'}")
+          ]
+          for old,new in replacements:
+              if old not in s:
+                  raise SystemExit("RADAR PATCH NOT FOUND: "+old[:80])
+              s=s.replace(old,new)
+          p.write_text(s,encoding='utf-8')
+
+          q=Path('.github/workflows/v39-stable-scheduler.yml')
+          t=q.read_text(encoding='utf-8')
+          sr=[
+            ("name: V3.9 Stable 5-Minute Intraday Scheduler","name: V3.9.9 Stable 3-Minute Intraday Scheduler"),
+            ("every 5 minutes","every 3 minutes"),
+            ("Stable intraday 5-minute scheduler","Stable intraday 3-minute scheduler"),
+            ("WAIT=$((300-USED))","WAIT=$((180-USED))"),
+            ("Dispatch V3.8.2:","Dispatch V3.9.9:"),
+            ("# V3.8.2 remains the scanner. V3.9 only replaces the unreliable\n            # every-5-minute GitHub cron with one persistent session scheduler.",
+             "# V3.9.9 scanner uses one persistent session scheduler.\n            # 3-minute cadence reduces confirmation delay without 1-minute noise.")
+          ]
+          for old,new in sr:
+              if old not in t:
+                  raise SystemExit("SCHEDULER PATCH NOT FOUND: "+old[:80])
+              t=t.replace(old,new)
+          q.write_text(t,encoding='utf-8')
+          PY
+
+      - name: Verify V3.9.9
+        run: |
+          grep -q "name: V3.9.9 Intraday Day-Trade Radar" .github/workflows/v37-intraday-radar.yml
+          grep -q "'version':'3.9.9'" .github/workflows/v37-intraday-radar.yml
+          grep -q "tracking_pool" .github/workflows/v37-intraday-radar.yml
+          grep -q "WAIT=\$((180-USED))" .github/workflows/v39-stable-scheduler.yml
+          echo "V3.9.9 verification passed."
+
+      - name: Commit upgrade and remove installer
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/v399-upgrade.yml
+          git add .github/workflows/v37-intraday-radar.yml .github/workflows/v39-stable-scheduler.yml
+          git commit -m "Upgrade intraday radar to V3.9.9"
+          git push
